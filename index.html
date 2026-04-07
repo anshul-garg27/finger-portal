@@ -6,35 +6,28 @@
   <title>Finger Portal</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: #000;
-      overflow: hidden;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-    }
+    body { background: #000; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
     canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
     video { display: none; }
+
     #loading {
-      position: fixed; inset: 0;
-      background: #000;
+      position: fixed; inset: 0; background: #000;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      z-index: 100; color: #fff;
-      transition: opacity 0.6s;
+      z-index: 100; color: #fff; transition: opacity 0.6s;
     }
     #loading.hidden { opacity: 0; pointer-events: none; }
     .loader {
       width: 50px; height: 50px;
-      border: 3px solid rgba(255,255,255,0.08);
-      border-top-color: #a855f7;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin-bottom: 16px;
+      border: 3px solid rgba(255,255,255,0.08); border-top-color: #a855f7;
+      border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 16px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     #loading p { font-size: 13px; opacity: 0.5; }
+
     #world-label {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-      color: rgba(255,255,255,0.7);
-      font-size: 12px; font-weight: 600; letter-spacing: 4px; text-transform: uppercase;
+      color: rgba(255,255,255,0.7); font-size: 12px; font-weight: 600;
+      letter-spacing: 4px; text-transform: uppercase;
       pointer-events: none; z-index: 10; transition: all 0.4s;
       text-shadow: 0 0 20px currentColor;
     }
@@ -43,6 +36,33 @@
       color: rgba(255,255,255,0.35); font-size: 11px; letter-spacing: 1px;
       pointer-events: none; z-index: 10; transition: opacity 0.8s;
     }
+
+    /* ── Controls ── */
+    #controls {
+      position: fixed; bottom: 18px; right: 18px; z-index: 20;
+      display: flex; gap: 8px; align-items: center;
+    }
+    .ctrl-btn {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.15);
+      color: #fff; padding: 7px 14px; border-radius: 20px; font-size: 11px;
+      cursor: pointer; backdrop-filter: blur(8px); transition: all 0.2s;
+      letter-spacing: 0.5px;
+    }
+    .ctrl-btn:hover { background: rgba(255,255,255,0.2); }
+    .ctrl-btn.recording { background: rgba(255,50,50,0.5); border-color: rgba(255,50,50,0.6); }
+    #rec-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #f00;
+      display: none; animation: pulse 1s infinite;
+    }
+    #rec-dot.on { display: block; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* ── World transition flash ── */
+    #flash {
+      position: fixed; inset: 0; background: #fff; opacity: 0;
+      pointer-events: none; z-index: 50; transition: opacity 0.15s;
+    }
+    #flash.active { opacity: 0.4; }
   </style>
 </head>
 <body>
@@ -50,173 +70,308 @@
   <canvas id="canvas"></canvas>
   <video id="video" playsinline></video>
   <div id="world-label">GALAXY</div>
-  <div id="hint">Thumb + index finger circle = portal &nbsp;|&nbsp; Space / Arrows = switch world</div>
+  <div id="hint">Thumb + index circle = portal &nbsp;|&nbsp; Space = switch &nbsp;|&nbsp; Both hands = bigger portal</div>
+  <div id="flash"></div>
+  <div id="controls">
+    <div id="rec-dot"></div>
+    <button class="ctrl-btn" id="btn-rec">REC</button>
+    <button class="ctrl-btn" id="btn-snap">SNAP</button>
+    <button class="ctrl-btn" id="btn-sound">SOUND ON</button>
+  </div>
 
   <script type="module">
     import { FilesetResolver, HandLandmarker } from
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs';
 
-    // ─── CONFIG ────────────────────────────────────────
-    const CFG = {
-      circleThreshold: 0.12,
-      minRadius: 25,
-      maxRadius: 420,
-      portalOpenSpeed: 0.09,
-      portalCloseSpeed: 0.055,
-      emaLandmark: 0.35,       // EMA smoothing for landmarks
-      emaTilt: 0.06,           // EMA smoothing for parallax tilt
-      gestureDebounce: 18,     // frames (~300ms) before portal state can change
-      starCount: 500,
-      fireCount: 250,
-      bubbleCount: 100,
-      leafCount: 70,
-      cyberCount: 120,
-      vortexCount: 40,         // particles swirling on portal rim
-      leakCount: 16,
+    // ═══════════════════════════════════════════════════
+    //  CONFIG
+    // ═══════════════════════════════════════════════════
+    const C = {
+      circleThresh: 0.12,
+      minR: 25, maxR: 450,
+      openSpeed: 0.09, closeSpeed: 0.05,
+      emaLandmark: 0.35, emaTilt: 0.06, emaCenter: 0.15,
+      starCount: 500, fireCount: 260, bubbleCount: 100, leafCount: 70, cyberCount: 120,
+      vortexCount: 45, leakCount: 18,
     };
 
-    // ─── STATE ─────────────────────────────────────────
+    // ═══════════════════════════════════════════════════
+    //  STATE
+    // ═══════════════════════════════════════════════════
     const S = {
-      portalActive: false,
-      center: { x: 0, y: 0 },
-      targetR: 0,
-      currentR: 0,
-      opacity: 0,
-      tilt: { x: 0, y: 0 },
-      smoothTilt: { x: 0, y: 0 },
-      smoothCenter: { x: 0, y: 0 },
-      smoothR: 0,
+      active: false, center: {x:0,y:0}, targetR: 0, curR: 0, opacity: 0,
+      tilt: {x:0,y:0}, sTilt: {x:0,y:0}, sCenter: {x:0,y:0},
       world: 0,
-      worldNames: ['GALAXY', 'FIRE', 'UNDERWATER', 'FOREST', 'CYBERPUNK'],
-      worldColors: ['#a855f7', '#f97316', '#06b6d4', '#22c55e', '#ec4899'],
-      otherHandIn: false,
-      otherFingers: [],
-      burst: [],
-      debounce: 0,
-      peaceCooldown: 0,
-      wasActive: false,
-      burstFired: false,
-      lastFrame: 0,
-      // EMA-smoothed landmarks for the portal hand
-      smoothLandmarks: null,
+      names: ['GALAXY','FIRE','UNDERWATER','FOREST','CYBERPUNK'],
+      colors: ['#a855f7','#f97316','#06b6d4','#22c55e','#ec4899'],
+      // color grading tints for camera feed
+      gradeColors: ['rgba(100,50,200,','rgba(255,100,20,','rgba(0,150,200,','rgba(50,180,50,','rgba(200,50,150,'],
+      otherIn: false, otherFingers: [],
+      burst: [], wasActive: false, burstFired: false,
+      peaceCd: 0, lastFrame: 0, smoothLm: null,
+      // shockwave
+      shockwave: 0, shockCenter: {x:0,y:0},
+      // two-hand portal
+      twoHand: false, hand2Circle: false,
+      // transition
+      transitioning: false, transTimer: 0,
+      // recording
+      recording: false, recorder: null, chunks: [],
+      // sound
+      soundOn: false,
     };
 
-    // ─── WORLD DATA ────────────────────────────────────
+    // ═══════════════════════════════════════════════════
+    //  WORLD DATA
+    // ═══════════════════════════════════════════════════
 
-    // Galaxy — logarithmic spiral arms (Density Wave Theory)
+    // Galaxy — spiral arms
     const ARMS = 3;
-    const stars = Array.from({ length: CFG.starCount }, (_, i) => {
+    const stars = Array.from({length: C.starCount}, (_, i) => {
       const arm = i % ARMS;
-      const t = Math.random();                         // 0..1 along arm
-      const armAngle = (arm / ARMS) * Math.PI * 2;
-      const spiral = armAngle + t * 4.5;               // logarithmic twist
-      const dist = 0.1 + t * 0.85;                     // distance from center
-      const scatter = (Math.random() - 0.5) * 0.25;    // scatter off arm center
+      const t = Math.random();
+      const spiral = (arm / ARMS) * Math.PI * 2 + t * 4.5;
+      const scatter = (Math.random() - 0.5) * 0.25;
       return {
-        angle: spiral + scatter,
-        dist,
+        angle: spiral + scatter, dist: 0.1 + t * 0.85,
         size: Math.random() * 2.2 + 0.4,
         brightness: 0.3 + Math.random() * 0.7,
-        twinkleOffset: Math.random() * 100,
-        color: Math.random() > 0.85 ? (Math.random() > 0.5 ? '#aaccff' : '#ffccaa') : '#ffffff',
+        twinkle: Math.random() * 100,
+        color: Math.random() > 0.85 ? (Math.random() > 0.5 ? '#aaccff' : '#ffccaa') : '#fff',
       };
     });
-    const nebulae = Array.from({ length: 10 }, () => ({
-      x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
-      r: Math.random() * 0.35 + 0.15,
-      color: ['#7c3aed', '#a855f7', '#3b82f6', '#6366f1', '#8b5cf6', '#c084fc'][Math.floor(Math.random() * 6)],
-      alpha: Math.random() * 0.12 + 0.04,
+    const nebulae = Array.from({length: 10}, () => ({
+      x: Math.random()*2-1, y: Math.random()*2-1,
+      r: Math.random()*0.35+0.15,
+      color: ['#7c3aed','#a855f7','#3b82f6','#6366f1','#8b5cf6','#c084fc'][Math.floor(Math.random()*6)],
+      a: Math.random()*0.12+0.04,
     }));
 
-    // Fire
-    const fires = Array.from({ length: CFG.fireCount }, () => makeFire());
-    function makeFire() {
-      return { x: (Math.random() - 0.5) * 1.4, y: 0.5 + Math.random() * 0.6,
-        vx: (Math.random() - 0.5) * 0.003, vy: -(Math.random() * 0.014 + 0.005),
-        size: Math.random() * 5 + 2, life: 1, maxLife: Math.random() * 0.5 + 0.5 };
-    }
+    const fires = Array.from({length: C.fireCount}, () => mkFire());
+    function mkFire() { return {x:(Math.random()-0.5)*1.4,y:0.5+Math.random()*0.6,vx:(Math.random()-0.5)*0.003,vy:-(Math.random()*0.014+0.005),size:Math.random()*5+2,life:1,ml:Math.random()*0.5+0.5}; }
 
-    // Underwater
-    const bubbles = Array.from({ length: CFG.bubbleCount }, () => makeBubble());
-    function makeBubble() {
-      return { x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
-        vy: -(Math.random() * 0.005 + 0.002), size: Math.random() * 4.5 + 1,
-        wobble: Math.random() * Math.PI * 2, alpha: Math.random() * 0.45 + 0.15 };
-    }
+    const bubbles = Array.from({length: C.bubbleCount}, () => mkBub());
+    function mkBub() { return {x:Math.random()*2-1,y:Math.random()*2-1,vy:-(Math.random()*0.005+0.002),size:Math.random()*4.5+1,w:Math.random()*Math.PI*2,a:Math.random()*0.45+0.15}; }
 
-    // Forest
-    const leaves = Array.from({ length: CFG.leafCount }, () => makeLeaf());
-    function makeLeaf() {
-      return { x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
-        vy: Math.random() * 0.003 + 0.001, vx: (Math.random() - 0.5) * 0.002,
-        rot: Math.random() * Math.PI * 2, rotV: (Math.random() - 0.5) * 0.025,
-        size: Math.random() * 5 + 3,
-        color: ['#22c55e','#16a34a','#4ade80','#86efac','#a3e635','#65a30d'][Math.floor(Math.random() * 6)] };
-    }
+    const leaves = Array.from({length: C.leafCount}, () => mkLeaf());
+    function mkLeaf() { return {x:Math.random()*2-1,y:Math.random()*2-1,vy:Math.random()*0.003+0.001,vx:(Math.random()-0.5)*0.002,rot:Math.random()*Math.PI*2,rv:(Math.random()-0.5)*0.025,size:Math.random()*5+3,color:['#22c55e','#16a34a','#4ade80','#86efac','#a3e635','#65a30d'][Math.floor(Math.random()*6)]}; }
 
-    // Cyberpunk
-    const cybers = Array.from({ length: CFG.cyberCount }, () => ({
-      x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
-      vy: Math.random() * 0.009 + 0.003, size: Math.random() * 2.5 + 1,
-      color: ['#ec4899','#a855f7','#06b6d4','#f472b6','#818cf8'][Math.floor(Math.random() * 5)],
-      alpha: Math.random() * 0.7 + 0.3,
+    const cybers = Array.from({length: C.cyberCount}, () => ({
+      x:Math.random()*2-1,y:Math.random()*2-1,vy:Math.random()*0.009+0.003,
+      size:Math.random()*2.5+1,
+      color:['#ec4899','#a855f7','#06b6d4','#f472b6','#818cf8'][Math.floor(Math.random()*5)],
+      a:Math.random()*0.7+0.3,
     }));
 
-    // Vortex rim particles
-    const vortex = Array.from({ length: CFG.vortexCount }, (_, i) => ({
-      angle: (i / CFG.vortexCount) * Math.PI * 2,
-      speed: 0.015 + Math.random() * 0.01,
-      offset: Math.random() * 8 - 4,
-      size: Math.random() * 2.5 + 1,
-      alpha: Math.random() * 0.6 + 0.3,
+    const vortex = Array.from({length: C.vortexCount}, (_, i) => ({
+      angle: (i/C.vortexCount)*Math.PI*2, speed: 0.015+Math.random()*0.01,
+      off: Math.random()*8-4, size: Math.random()*2.5+1, a: Math.random()*0.6+0.3,
     }));
 
-    // Leak particles
-    const leaks = Array.from({ length: CFG.leakCount }, () => ({
-      x: 0, y: 0, vx: 0, vy: 0, life: 0, size: 2,
-    }));
+    const leaks = Array.from({length: C.leakCount}, () => ({x:0,y:0,vx:0,vy:0,life:0,size:2}));
 
-    // ─── CANVAS ────────────────────────────────────────
+    // ═══════════════════════════════════════════════════
+    //  CANVAS
+    // ═══════════════════════════════════════════════════
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const video = document.getElementById('video');
 
-    // Offscreen canvas for world pre-rendering
-    const worldCanvas = document.createElement('canvas');
-    const wCtx = worldCanvas.getContext('2d');
-
-    function resize() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-      worldCanvas.width = 900;
-      worldCanvas.height = 900;
-    }
+    function resize() { canvas.width = innerWidth; canvas.height = innerHeight; }
     resize();
-    window.addEventListener('resize', resize);
+    addEventListener('resize', resize);
 
-    // ─── MEDIAPIPE TASKS-VISION (Modern API) ───────────
-    let handLandmarker = null;
-    let lastVideoTime = -1;
+    // ═══════════════════════════════════════════════════
+    //  SOUND ENGINE (procedural Web Audio)
+    // ═══════════════════════════════════════════════════
+    let audioCtx = null, audioDest = null;
+    let ambientOsc = null, ambientGain = null, ambientFilter = null;
 
-    async function initMediaPipe() {
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
-      );
-      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    function initAudio() {
+      audioCtx = new AudioContext();
+      audioDest = audioCtx.createMediaStreamDestination();
+    }
+
+    function playWhoosh() {
+      if (!audioCtx || !S.soundOn) return;
+      const now = audioCtx.currentTime;
+      // Rising sweep
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const filter = audioCtx.createBiquadFilter();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(80, now);
+      osc.frequency.exponentialRampToValueAtTime(600, now + 0.3);
+      osc.frequency.exponentialRampToValueAtTime(150, now + 0.6);
+      filter.type = 'lowpass';
+      filter.frequency.value = 1200;
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.15, now + 0.1);
+      gain.gain.linearRampToValueAtTime(0, now + 0.6);
+      osc.connect(filter).connect(gain).connect(audioCtx.destination);
+      gain.connect(audioDest);
+      osc.start(now); osc.stop(now + 0.7);
+
+      // Noise burst
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.4, audioCtx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.5;
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buf;
+      const nGain = audioCtx.createGain();
+      const nFilter = audioCtx.createBiquadFilter();
+      nFilter.type = 'bandpass'; nFilter.frequency.value = 400; nFilter.Q.value = 0.5;
+      nGain.gain.setValueAtTime(0, now);
+      nGain.gain.linearRampToValueAtTime(0.08, now + 0.05);
+      nGain.gain.linearRampToValueAtTime(0, now + 0.4);
+      noise.connect(nFilter).connect(nGain).connect(audioCtx.destination);
+      nGain.connect(audioDest);
+      noise.start(now); noise.stop(now + 0.5);
+    }
+
+    function playClose() {
+      if (!audioCtx || !S.soundOn) return;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(400, now);
+      osc.frequency.exponentialRampToValueAtTime(60, now + 0.3);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.35);
+      osc.connect(gain).connect(audioCtx.destination);
+      gain.connect(audioDest);
+      osc.start(now); osc.stop(now + 0.4);
+    }
+
+    function playSwitch() {
+      if (!audioCtx || !S.soundOn) return;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.exponentialRampToValueAtTime(800, now + 0.08);
+      osc.frequency.exponentialRampToValueAtTime(400, now + 0.15);
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.18);
+      osc.connect(gain).connect(audioCtx.destination);
+      gain.connect(audioDest);
+      osc.start(now); osc.stop(now + 0.2);
+    }
+
+    // Ambient world drones
+    const ambientConfigs = [
+      { type: 'sine', freq: 55, filterFreq: 200, filterQ: 2, vol: 0.04 },      // galaxy
+      { type: 'sawtooth', freq: 40, filterFreq: 120, filterQ: 1, vol: 0.025 },  // fire
+      { type: 'sine', freq: 70, filterFreq: 300, filterQ: 3, vol: 0.035 },      // underwater
+      { type: 'sine', freq: 90, filterFreq: 250, filterQ: 0.5, vol: 0.025 },    // forest
+      { type: 'sawtooth', freq: 65, filterFreq: 400, filterQ: 4, vol: 0.03 },   // cyberpunk
+    ];
+
+    function startAmbient() {
+      if (!audioCtx || !S.soundOn) return;
+      stopAmbient();
+      const cfg = ambientConfigs[S.world];
+      ambientOsc = audioCtx.createOscillator();
+      ambientGain = audioCtx.createGain();
+      ambientFilter = audioCtx.createBiquadFilter();
+      ambientOsc.type = cfg.type;
+      ambientOsc.frequency.value = cfg.freq;
+      ambientFilter.type = 'lowpass';
+      ambientFilter.frequency.value = cfg.filterFreq;
+      ambientFilter.Q.value = cfg.filterQ;
+      ambientGain.gain.setValueAtTime(0, audioCtx.currentTime);
+      ambientGain.gain.linearRampToValueAtTime(cfg.vol, audioCtx.currentTime + 0.5);
+      ambientOsc.connect(ambientFilter).connect(ambientGain).connect(audioCtx.destination);
+      ambientGain.connect(audioDest);
+      ambientOsc.start();
+    }
+
+    function stopAmbient() {
+      if (ambientOsc) {
+        try {
+          ambientGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.3);
+          ambientOsc.stop(audioCtx.currentTime + 0.4);
+        } catch(e) {}
+        ambientOsc = null;
+      }
+    }
+
+    // ═══════════════════════════════════════════════════
+    //  RECORDING
+    // ═══════════════════════════════════════════════════
+    function toggleRecord() {
+      if (S.recording) stopRecord(); else startRecord();
+    }
+
+    function startRecord() {
+      if (!audioCtx) initAudio();
+      const vidStream = canvas.captureStream(30);
+      const tracks = [vidStream.getVideoTracks()[0]];
+      if (audioDest && audioDest.stream.getAudioTracks().length > 0) {
+        tracks.push(audioDest.stream.getAudioTracks()[0]);
+      }
+      const stream = new MediaStream(tracks);
+
+      const types = ['video/webm; codecs=vp9,opus','video/webm; codecs=vp8,opus','video/webm',''];
+      const mime = types.find(t => !t || MediaRecorder.isTypeSupported(t)) || '';
+
+      S.recorder = new MediaRecorder(stream, {
+        mimeType: mime || undefined,
+        videoBitsPerSecond: 8_000_000,
+      });
+      S.chunks = [];
+      S.recorder.ondataavailable = e => S.chunks.push(e.data);
+      S.recorder.onstop = () => {
+        const blob = new Blob(S.chunks, { type: 'video/webm' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `finger-portal-${Date.now()}.webm`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+      S.recorder.start();
+      S.recording = true;
+      document.getElementById('btn-rec').classList.add('recording');
+      document.getElementById('btn-rec').textContent = 'STOP';
+      document.getElementById('rec-dot').classList.add('on');
+    }
+
+    function stopRecord() {
+      if (S.recorder) S.recorder.stop();
+      S.recording = false;
+      document.getElementById('btn-rec').classList.remove('recording');
+      document.getElementById('btn-rec').textContent = 'REC';
+      document.getElementById('rec-dot').classList.remove('on');
+    }
+
+    function takeScreenshot() {
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = `finger-portal-${Date.now()}.png`;
+      a.click();
+    }
+
+    // ═══════════════════════════════════════════════════
+    //  MEDIAPIPE
+    // ═══════════════════════════════════════════════════
+    let handLandmarker = null, lastVidTime = -1;
+
+    async function initMP() {
+      const v = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm');
+      handLandmarker = await HandLandmarker.createFromOptions(v, {
         baseOptions: {
           modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
           delegate: 'GPU',
         },
-        runningMode: 'VIDEO',
-        numHands: 2,
-        minHandDetectionConfidence: 0.6,
-        minHandPresenceConfidence: 0.6,
-        minTrackingConfidence: 0.5,
+        runningMode: 'VIDEO', numHands: 2,
+        minHandDetectionConfidence: 0.6, minHandPresenceConfidence: 0.6, minTrackingConfidence: 0.5,
       });
     }
 
-    // ─── CAMERA ────────────────────────────────────────
-    async function startCamera() {
+    async function startCam() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
       });
@@ -227,682 +382,558 @@
       detectLoop();
     }
 
-    // ─── DETECTION LOOP ────────────────────────────────
     function detectLoop() {
-      if (video.currentTime !== lastVideoTime && handLandmarker) {
-        lastVideoTime = video.currentTime;
-        const results = handLandmarker.detectForVideo(video, performance.now());
-        processHands(results);
+      if (video.currentTime !== lastVidTime && handLandmarker) {
+        lastVidTime = video.currentTime;
+        processHands(handLandmarker.detectForVideo(video, performance.now()));
       }
       requestAnimationFrame(detectLoop);
     }
 
-    // ─── EMA SMOOTHING ─────────────────────────────────
-    function emaSmooth(prev, curr, alpha) {
-      if (!prev) return curr.map(lm => ({ ...lm }));
-      return curr.map((lm, i) => ({
-        x: prev[i].x * (1 - alpha) + lm.x * alpha,
-        y: prev[i].y * (1 - alpha) + lm.y * alpha,
-        z: prev[i].z * (1 - alpha) + lm.z * alpha,
-      }));
+    // ═══════════════════════════════════════════════════
+    //  HAND PROCESSING
+    // ═══════════════════════════════════════════════════
+    function ema(prev, curr, a) {
+      if (!prev) return curr.map(l => ({...l}));
+      return curr.map((l,i) => ({x:prev[i].x*(1-a)+l.x*a, y:prev[i].y*(1-a)+l.y*a, z:prev[i].z*(1-a)+l.z*a}));
     }
 
-    // ─── HAND PROCESSING ───────────────────────────────
-    function processHands(results) {
+    let prevActive = false;
+
+    function processHands(res) {
       const W = canvas.width, H = canvas.height;
-      S.portalActive = false;
-      S.otherHandIn = false;
-      S.otherFingers = [];
+      S.active = false; S.otherIn = false; S.otherFingers = [];
+      S.twoHand = false; S.hand2Circle = false;
+      if (S.peaceCd > 0) S.peaceCd--;
 
-      if (S.debounce > 0) S.debounce--;
-      if (S.peaceCooldown > 0) S.peaceCooldown--;
+      const hands = res.landmarks;
+      if (!hands || !hands.length) { S.smoothLm = null; return; }
 
-      const hands = results.landmarks;
-      if (!hands || hands.length === 0) {
-        S.smoothLandmarks = null;
-        return;
-      }
+      let portalHand = -1;
 
+      // Check each hand for circle gesture
       for (let h = 0; h < hands.length; h++) {
         let lm = hands[h];
+        if (h === 0) { S.smoothLm = ema(S.smoothLm, lm, C.emaLandmark); lm = S.smoothLm; }
 
-        // Apply EMA smoothing to first hand (portal hand)
-        if (h === 0) {
-          S.smoothLandmarks = emaSmooth(S.smoothLandmarks, lm, CFG.emaLandmark);
-          lm = S.smoothLandmarks;
+        const thumb = lm[4], idx = lm[8], wrist = lm[0], mid = lm[9];
+        const d = Math.hypot(thumb.x - idx.x, thumb.y - idx.y);
+
+        if (d < C.circleThresh && portalHand === -1) {
+          portalHand = h;
+          S.active = true;
+          S.center.x = (1 - (thumb.x + idx.x) / 2) * W;
+          S.center.y = ((thumb.y + idx.y) / 2) * H;
+          const hs = Math.hypot(wrist.x - mid.x, wrist.y - mid.y);
+          S.targetR = Math.min(C.maxR, Math.max(C.minR, hs * W * 1.3));
+          S.tilt.x = (mid.x - wrist.x) * 280;
+          S.tilt.y = (mid.y - wrist.y) * 280;
         }
+      }
 
-        const thumb = lm[4], index = lm[8], wrist = lm[0], midBase = lm[9];
-        const dx = thumb.x - index.x, dy = thumb.y - index.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist < CFG.circleThreshold && !S.portalActive) {
-          S.portalActive = true;
-          S.center.x = (1 - (thumb.x + index.x) / 2) * W;
-          S.center.y = ((thumb.y + index.y) / 2) * H;
-
-          const handSize = Math.sqrt(
-            Math.pow(wrist.x - midBase.x, 2) + Math.pow(wrist.y - midBase.y, 2)
-          );
-          S.targetR = Math.min(CFG.maxRadius, Math.max(CFG.minRadius, handSize * W * 1.3));
-
-          S.tilt.x = (midBase.x - wrist.x) * 280;
-          S.tilt.y = (midBase.y - wrist.y) * 280;
-        }
-
-        // Other hand in portal check
-        if (S.portalActive && h > 0) {
-          for (const idx of [4, 8, 12, 16, 20]) {
-            const f = lm[idx];
-            const fx = (1 - f.x) * W, fy = f.y * H;
-            const d = Math.sqrt((fx - S.smoothCenter.x) ** 2 + (fy - S.smoothCenter.y) ** 2);
-            if (d < S.currentR) {
-              S.otherHandIn = true;
-              S.otherFingers.push({ x: fx, y: fy });
+      // Two-hand portal: if second hand also makes circle, enlarge
+      if (hands.length === 2 && portalHand >= 0) {
+        const h2 = portalHand === 0 ? 1 : 0;
+        const lm2 = hands[h2];
+        const d2 = Math.hypot(lm2[4].x - lm2[8].x, lm2[4].y - lm2[8].y);
+        if (d2 < C.circleThresh) {
+          S.twoHand = true;
+          // Expand portal — center between both hands, larger radius
+          const c2x = (1 - (lm2[4].x + lm2[8].x) / 2) * W;
+          const c2y = ((lm2[4].y + lm2[8].y) / 2) * H;
+          S.center.x = (S.center.x + c2x) / 2;
+          S.center.y = (S.center.y + c2y) / 2;
+          const dist = Math.hypot(S.center.x - c2x, S.center.y - c2y);
+          S.targetR = Math.min(C.maxR * 1.5, Math.max(S.targetR, dist + 80));
+        } else {
+          // Check other hand fingers in portal
+          for (const fi of [4,8,12,16,20]) {
+            const f = lm2[fi];
+            const fx = (1-f.x)*W, fy = f.y*H;
+            if (Math.hypot(fx-S.sCenter.x, fy-S.sCenter.y) < S.curR) {
+              S.otherIn = true;
+              S.otherFingers.push({x:fx,y:fy});
+            }
+          }
+          // Peace sign check on non-portal hand
+          if (S.peaceCd <= 0) {
+            const l = lm2;
+            if (l[8].y<l[6].y && l[12].y<l[10].y && l[16].y>l[14].y && l[20].y>l[18].y) {
+              switchWorld(1); S.peaceCd = 90;
             }
           }
         }
-
-        // Peace sign — only non-portal hand
-        if (S.peaceCooldown <= 0 && !(dist < CFG.circleThreshold)) {
-          const iUp = lm[8].y < lm[6].y, mUp = lm[12].y < lm[10].y;
-          const rDn = lm[16].y > lm[14].y, pDn = lm[20].y > lm[18].y;
-          if (iUp && mUp && rDn && pDn) {
-            switchWorld(1);
-            S.peaceCooldown = 90;
-          }
-        }
       }
+
+      // Trigger shockwave on portal open
+      if (S.active && !prevActive) {
+        S.shockwave = 1;
+        S.shockCenter = { x: S.center.x, y: S.center.y };
+        playWhoosh();
+        startAmbient();
+      }
+      if (!S.active && prevActive) {
+        playClose();
+        stopAmbient();
+      }
+      prevActive = S.active;
     }
 
     function switchWorld(dir) {
-      S.world = (S.world + dir + S.worldNames.length) % S.worldNames.length;
-      document.getElementById('world-label').textContent = S.worldNames[S.world];
+      S.world = (S.world + dir + S.names.length) % S.names.length;
+      document.getElementById('world-label').textContent = S.names[S.world];
+      // Flash transition
+      const flash = document.getElementById('flash');
+      flash.classList.add('active');
+      setTimeout(() => flash.classList.remove('active'), 150);
+      playSwitch();
+      if (S.active) startAmbient();
     }
 
-    // ─── KEYBOARD ──────────────────────────────────────
+    // ═══════════════════════════════════════════════════
+    //  CONTROLS
+    // ═══════════════════════════════════════════════════
     document.addEventListener('keydown', e => {
-      if (e.code === 'Space' || e.code === 'ArrowRight') { e.preventDefault(); switchWorld(1); }
-      if (e.code === 'ArrowLeft') { e.preventDefault(); switchWorld(-1); }
+      if (e.code==='Space'||e.code==='ArrowRight') { e.preventDefault(); switchWorld(1); }
+      if (e.code==='ArrowLeft') { e.preventDefault(); switchWorld(-1); }
+    });
+    document.getElementById('btn-rec').addEventListener('click', toggleRecord);
+    document.getElementById('btn-snap').addEventListener('click', takeScreenshot);
+    document.getElementById('btn-sound').addEventListener('click', () => {
+      if (!audioCtx) initAudio();
+      S.soundOn = !S.soundOn;
+      document.getElementById('btn-sound').textContent = S.soundOn ? 'SOUND OFF' : 'SOUND ON';
+      if (S.soundOn && audioCtx.state === 'suspended') audioCtx.resume();
+      if (S.soundOn && S.active) startAmbient();
+      if (!S.soundOn) stopAmbient();
     });
 
-    // ─── RENDER ────────────────────────────────────────
+    // ═══════════════════════════════════════════════════
+    //  RENDER
+    // ═══════════════════════════════════════════════════
     let time = 0;
 
     function render() {
       requestAnimationFrame(render);
       const now = performance.now();
-      const dt = Math.min((now - (S.lastFrame || now)) / 16.67, 3);
-      S.lastFrame = now;
-      time += 0.016 * dt;
+      const dt = Math.min((now - (S.lastFrame||now))/16.67, 3);
+      S.lastFrame = now; time += 0.016*dt;
 
       const W = canvas.width, H = canvas.height;
-      ctx.clearRect(0, 0, W, H);
+      ctx.clearRect(0,0,W,H);
 
-      // Camera feed (mirrored)
-      ctx.save();
-      ctx.translate(W, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, 0, 0, W, H);
-      ctx.restore();
+      // Camera (mirrored)
+      ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+      ctx.drawImage(video,0,0,W,H); ctx.restore();
 
-      // Smooth all portal values with EMA
-      S.smoothTilt.x += (S.tilt.x - S.smoothTilt.x) * CFG.emaTilt * dt;
-      S.smoothTilt.y += (S.tilt.y - S.smoothTilt.y) * CFG.emaTilt * dt;
-      S.smoothCenter.x += (S.center.x - S.smoothCenter.x) * 0.15 * dt;
-      S.smoothCenter.y += (S.center.y - S.smoothCenter.y) * 0.15 * dt;
+      // Smooth values
+      S.sTilt.x += (S.tilt.x - S.sTilt.x) * C.emaTilt * dt;
+      S.sTilt.y += (S.tilt.y - S.sTilt.y) * C.emaTilt * dt;
+      S.sCenter.x += (S.center.x - S.sCenter.x) * C.emaCenter * dt;
+      S.sCenter.y += (S.center.y - S.sCenter.y) * C.emaCenter * dt;
 
-      // Portal radius animation
-      if (S.portalActive) {
-        S.currentR += (S.targetR - S.currentR) * CFG.portalOpenSpeed * dt;
-        S.opacity = Math.min(1, S.opacity + 0.07 * dt);
-        S.burstFired = false;
-        S.wasActive = true;
+      // Portal animation
+      if (S.active) {
+        S.curR += (S.targetR - S.curR) * C.openSpeed * dt;
+        S.opacity = Math.min(1, S.opacity + 0.07*dt);
+        S.burstFired = false; S.wasActive = true;
       } else {
-        S.currentR *= (1 - CFG.portalCloseSpeed * dt);
-        S.opacity = Math.max(0, S.opacity - 0.035 * dt);
-
-        if (S.wasActive && !S.burstFired && S.currentR > 8) {
-          S.burstFired = true;
-          S.wasActive = false;
-          for (let i = 0; i < 30; i++) {
-            const a = Math.random() * Math.PI * 2;
-            S.burst.push({
-              x: S.smoothCenter.x, y: S.smoothCenter.y,
-              vx: Math.cos(a) * (Math.random() * 5 + 2),
-              vy: Math.sin(a) * (Math.random() * 5 + 2),
-              life: 1, size: Math.random() * 4 + 1.5,
-              color: S.worldColors[S.world],
-            });
+        S.curR *= (1 - C.closeSpeed*dt);
+        S.opacity = Math.max(0, S.opacity - 0.035*dt);
+        if (S.wasActive && !S.burstFired && S.curR > 8) {
+          S.burstFired = true; S.wasActive = false;
+          for (let i=0;i<30;i++) {
+            const a = Math.random()*Math.PI*2;
+            S.burst.push({x:S.sCenter.x,y:S.sCenter.y,vx:Math.cos(a)*(Math.random()*5+2),vy:Math.sin(a)*(Math.random()*5+2),life:1,size:Math.random()*4+1.5,color:S.colors[S.world]});
           }
         }
-        if (S.currentR < 2) S.currentR = 0;
+        if (S.curR < 2) S.curR = 0;
       }
 
-      const r = S.currentR;
-      const cx = S.smoothCenter.x, cy = S.smoothCenter.y;
+      const r = S.curR, cx = S.sCenter.x, cy = S.sCenter.y;
+
+      // ── SHOCKWAVE RIPPLE ──
+      if (S.shockwave > 0) {
+        S.shockwave -= 0.025 * dt;
+        const sw = (1 - S.shockwave) * Math.max(W,H) * 0.6;
+        const swAlpha = S.shockwave * 0.3;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.beginPath();
+        ctx.arc(S.shockCenter.x, S.shockCenter.y, sw, 0, Math.PI*2);
+        ctx.strokeStyle = S.colors[S.world];
+        ctx.globalAlpha = swAlpha;
+        ctx.lineWidth = 3 + (1-S.shockwave)*8;
+        ctx.stroke();
+        ctx.restore();
+      }
 
       if (r > 4 && S.opacity > 0.01) {
-        // ── LIGHT SPILLAGE (portal tints surrounding camera feed) ──
+        // ── CAMERA COLOR GRADE ──
+        ctx.save();
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.globalAlpha = 0.06 * S.opacity;
+        ctx.fillStyle = S.gradeColors[S.world] + '1)';
+        ctx.fillRect(0,0,W,H);
+        ctx.restore();
+
+        // ── LIGHT SPILLAGE ──
         ctx.save();
         ctx.globalCompositeOperation = 'screen';
         const spillR = r * 2.5;
-        const spill = ctx.createRadialGradient(cx, cy, r * 0.8, cx, cy, spillR);
-        spill.addColorStop(0, hexToRGBA(S.worldColors[S.world], 0.12));
-        spill.addColorStop(0.5, hexToRGBA(S.worldColors[S.world], 0.05));
+        const spill = ctx.createRadialGradient(cx,cy,r*0.8,cx,cy,spillR);
+        spill.addColorStop(0, hex2rgba(S.colors[S.world], 0.14));
+        spill.addColorStop(0.5, hex2rgba(S.colors[S.world], 0.05));
         spill.addColorStop(1, 'transparent');
         ctx.fillStyle = spill;
-        ctx.fillRect(cx - spillR, cy - spillR, spillR * 2, spillR * 2);
+        ctx.fillRect(cx-spillR,cy-spillR,spillR*2,spillR*2);
         ctx.restore();
 
-        // ── SHADOW RING (anchors portal to reality) ──
+        // ── SHADOW RING ──
         ctx.save();
         ctx.globalCompositeOperation = 'multiply';
-        const shadow = ctx.createRadialGradient(cx, cy, r, cx, cy, r + 35);
-        shadow.addColorStop(0, 'rgba(0,0,0,0)');
-        shadow.addColorStop(0.3, 'rgba(0,0,0,0.15)');
-        shadow.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = shadow;
-        ctx.fillRect(cx - r - 40, cy - r - 40, (r + 40) * 2, (r + 40) * 2);
+        const sh = ctx.createRadialGradient(cx,cy,r,cx,cy,r+35);
+        sh.addColorStop(0,'rgba(0,0,0,0)');
+        sh.addColorStop(0.3,'rgba(0,0,0,0.15)');
+        sh.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle=sh;
+        ctx.fillRect(cx-r-40,cy-r-40,(r+40)*2,(r+40)*2);
         ctx.restore();
 
-        // ── RENDER WORLD INTO PORTAL CLIP ──
+        // ── WORLD INSIDE PORTAL ──
         ctx.save();
         ctx.globalAlpha = S.opacity;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.clip();
+        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+        drawWorld(ctx,cx,cy,r,time,dt);
 
-        drawWorld(ctx, cx, cy, r, time, dt);
+        // Vignette
+        const vig = ctx.createRadialGradient(cx,cy,r*0.35,cx,cy,r);
+        vig.addColorStop(0,'transparent');
+        vig.addColorStop(0.65,'transparent');
+        vig.addColorStop(1,'rgba(0,0,0,0.55)');
+        ctx.fillStyle=vig;
+        ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-        // Portal vignette (depth)
-        const vig = ctx.createRadialGradient(cx, cy, r * 0.35, cx, cy, r);
-        vig.addColorStop(0, 'transparent');
-        vig.addColorStop(0.65, 'transparent');
-        vig.addColorStop(1, 'rgba(0,0,0,0.55)');
-        ctx.fillStyle = vig;
-        ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-
-        // Reach-in distortion
-        if (S.otherHandIn) {
+        // Reach-in
+        if (S.otherIn) {
           for (const f of S.otherFingers) {
-            const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 35);
-            g.addColorStop(0, 'rgba(255,255,255,0.3)');
-            g.addColorStop(0.4, 'rgba(255,255,255,0.1)');
-            g.addColorStop(1, 'rgba(0,0,0,0.35)');
-            ctx.fillStyle = g;
-            ctx.beginPath();
-            ctx.arc(f.x, f.y, 35, 0, Math.PI * 2);
-            ctx.fill();
+            const g = ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,35);
+            g.addColorStop(0,'rgba(255,255,255,0.3)');
+            g.addColorStop(0.4,'rgba(255,255,255,0.1)');
+            g.addColorStop(1,'rgba(0,0,0,0.35)');
+            ctx.fillStyle=g;
+            ctx.beginPath(); ctx.arc(f.x,f.y,35,0,Math.PI*2); ctx.fill();
           }
         }
-
         ctx.restore();
 
-        // ── CHROMATIC ABERRATION at portal edge ──
-        drawChromaticRim(ctx, cx, cy, r);
+        // ── CHROMATIC RIM ──
+        const cs = 3 + Math.sin(time*2)*1.5;
+        ctx.save(); ctx.globalAlpha = 0.25*S.opacity; ctx.globalCompositeOperation='lighter';
+        ctx.beginPath(); ctx.arc(cx,cy,r+cs,0,Math.PI*2);
+        ctx.strokeStyle='#ff0000'; ctx.lineWidth=2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx,cy,r-cs*0.7,0,Math.PI*2);
+        ctx.strokeStyle='#0066ff'; ctx.lineWidth=2; ctx.stroke();
+        ctx.restore();
 
-        // ── VORTEX RIM PARTICLES (swirling on border) ──
-        drawVortex(ctx, cx, cy, r, time, dt);
-
-        // ── EDGE GLOW (layered additive) ──
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
-        const glowCol = S.worldColors[S.world];
-        const pulse = 0.5 + Math.sin(time * 2.5) * 0.2;
-
-        for (let i = 4; i >= 1; i--) {
-          ctx.beginPath();
-          ctx.arc(cx, cy, r + i * 5, 0, Math.PI * 2);
-          ctx.strokeStyle = glowCol;
-          ctx.globalAlpha = pulse * (0.2 / i) * S.opacity;
-          ctx.lineWidth = 3 + i;
-          ctx.stroke();
+        // ── VORTEX ──
+        ctx.save(); ctx.globalCompositeOperation='lighter';
+        for (const v of vortex) {
+          v.angle += v.speed*dt;
+          const px=cx+Math.cos(v.angle)*(r+v.off), py=cy+Math.sin(v.angle)*(r+v.off);
+          ctx.beginPath(); ctx.arc(px,py,v.size,0,Math.PI*2);
+          ctx.fillStyle=S.colors[S.world];
+          ctx.globalAlpha=v.a*S.opacity*(0.5+Math.sin(time*4+v.angle*3)*0.3);
+          ctx.fill();
         }
-        // Bright inner rim
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.strokeStyle = '#fff';
-        ctx.globalAlpha = 0.5 * S.opacity;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
         ctx.restore();
 
-        // ── LEAK PARTICLES ──
-        if (S.portalActive) drawLeaks(ctx, cx, cy, r, dt);
+        // ── EDGE GLOW ──
+        ctx.save(); ctx.globalCompositeOperation='lighter';
+        const pulse = 0.5+Math.sin(time*2.5)*0.2;
+        for (let i=4;i>=1;i--) {
+          ctx.beginPath(); ctx.arc(cx,cy,r+i*5,0,Math.PI*2);
+          ctx.strokeStyle=S.colors[S.world];
+          ctx.globalAlpha=pulse*(0.2/i)*S.opacity;
+          ctx.lineWidth=3+i; ctx.stroke();
+        }
+        ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
+        ctx.strokeStyle='#fff'; ctx.globalAlpha=0.5*S.opacity;
+        ctx.lineWidth=1.5; ctx.stroke();
+        ctx.restore();
+
+        // ── WORLD-SPECIFIC LEAK PARTICLES ──
+        if (S.active) drawLeaks(ctx,cx,cy,r,dt);
+
+        // ── TWO-HAND INDICATOR ──
+        if (S.twoHand) {
+          ctx.save(); ctx.globalCompositeOperation='lighter';
+          ctx.beginPath(); ctx.arc(cx,cy,r+15,0,Math.PI*2);
+          ctx.strokeStyle='#fff'; ctx.globalAlpha=0.15+Math.sin(time*5)*0.1;
+          ctx.lineWidth=2; ctx.setLineDash([8,8]); ctx.stroke();
+          ctx.restore();
+        }
       }
 
       // Burst particles
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = S.burst.length - 1; i >= 0; i--) {
-        const p = S.burst[i];
-        p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.022 * dt;
-        if (p.life <= 0) { S.burst.splice(i, 1); continue; }
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.life * 0.7;
-        ctx.fill();
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      for (let i=S.burst.length-1;i>=0;i--) {
+        const p=S.burst[i];
+        p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=0.022*dt;
+        if (p.life<=0) { S.burst.splice(i,1); continue; }
+        ctx.beginPath(); ctx.arc(p.x,p.y,p.size*p.life,0,Math.PI*2);
+        ctx.fillStyle=p.color; ctx.globalAlpha=p.life*0.7; ctx.fill();
       }
       ctx.restore();
 
-      // World label
-      const label = document.getElementById('world-label');
-      label.style.color = S.worldColors[S.world];
-      label.style.opacity = S.currentR > 5 ? '0.8' : '0.25';
+      // Label
+      const lbl = document.getElementById('world-label');
+      lbl.style.color = S.colors[S.world];
+      lbl.style.opacity = S.curR > 5 ? '0.8' : '0.25';
     }
 
-    // ─── CHROMATIC ABERRATION ──────────────────────────
-    function drawChromaticRim(ctx, cx, cy, r) {
-      const strength = 3 + Math.sin(time * 2) * 1.5;
-      ctx.save();
-      ctx.globalAlpha = 0.25 * S.opacity;
-      ctx.globalCompositeOperation = 'lighter';
-
-      // Red ring (shifted outward)
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + strength, 0, Math.PI * 2);
-      ctx.strokeStyle = '#ff0000';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Blue ring (shifted inward)
-      ctx.beginPath();
-      ctx.arc(cx, cy, r - strength * 0.7, 0, Math.PI * 2);
-      ctx.strokeStyle = '#0066ff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.restore();
+    // ═══════════════════════════════════════════════════
+    //  WORLD RENDERERS
+    // ═══════════════════════════════════════════════════
+    function drawWorld(ctx,cx,cy,r,t,dt) {
+      const px=S.sTilt.x, py=S.sTilt.y;
+      [drawGalaxy,drawFire,drawUnderwater,drawForest,drawCyberpunk][S.world](ctx,cx,cy,r,t,dt,px,py);
     }
 
-    // ─── VORTEX RIM PARTICLES ──────────────────────────
-    function drawVortex(ctx, cx, cy, r, t, dt) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const col = S.worldColors[S.world];
+    function drawGalaxy(ctx,cx,cy,r,t,px,py) {
+      const bg=ctx.createRadialGradient(cx+px*0.3,cy+py*0.3,0,cx,cy,r);
+      bg.addColorStop(0,'#0c0020'); bg.addColorStop(0.4,'#08001a'); bg.addColorStop(1,'#020008');
+      ctx.fillStyle=bg; ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-      for (const v of vortex) {
-        v.angle += v.speed * dt;
-        const px = cx + Math.cos(v.angle) * (r + v.offset);
-        const py = cy + Math.sin(v.angle) * (r + v.offset);
-
-        ctx.beginPath();
-        ctx.arc(px, py, v.size, 0, Math.PI * 2);
-        ctx.fillStyle = col;
-        ctx.globalAlpha = v.alpha * S.opacity * (0.5 + Math.sin(t * 4 + v.angle * 3) * 0.3);
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-
-    // ─── LEAK PARTICLES ────────────────────────────────
-    function drawLeaks(ctx, cx, cy, r, dt) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const col = S.worldColors[S.world];
-
-      for (const p of leaks) {
-        p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.014 * dt;
-        if (p.life <= 0) {
-          const a = Math.random() * Math.PI * 2;
-          p.x = cx + Math.cos(a) * r;
-          p.y = cy + Math.sin(a) * r;
-          p.vx = Math.cos(a) * (Math.random() * 1.8 + 0.6);
-          p.vy = Math.sin(a) * (Math.random() * 1.8 + 0.6);
-          p.life = 1;
-          p.size = Math.random() * 3 + 1;
-        }
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
-        ctx.fillStyle = col;
-        ctx.globalAlpha = p.life * 0.5;
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-
-    // ─── DRAW WORLD ────────────────────────────────────
-    function drawWorld(ctx, cx, cy, r, t, dt) {
-      const px = S.smoothTilt.x, py = S.smoothTilt.y;
-      switch (S.world) {
-        case 0: drawGalaxy(ctx, cx, cy, r, t, px, py); break;
-        case 1: drawFire(ctx, cx, cy, r, t, dt, px, py); break;
-        case 2: drawUnderwater(ctx, cx, cy, r, t, dt, px, py); break;
-        case 3: drawForest(ctx, cx, cy, r, t, dt, px, py); break;
-        case 4: drawCyberpunk(ctx, cx, cy, r, t, dt, px, py); break;
-      }
-    }
-
-    // ── GALAXY (spiral arms) ──
-    function drawGalaxy(ctx, cx, cy, r, t, px, py) {
-      // Deep space background
-      const bg = ctx.createRadialGradient(cx + px * 0.3, cy + py * 0.3, 0, cx, cy, r);
-      bg.addColorStop(0, '#0c0020');
-      bg.addColorStop(0.4, '#08001a');
-      bg.addColorStop(1, '#020008');
-      ctx.fillStyle = bg;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-
-      // Nebula clouds
       for (const n of nebulae) {
-        const nx = cx + n.x * r * 0.6 + px * 0.2, ny = cy + n.y * r * 0.6 + py * 0.2;
-        const nr = n.r * r;
-        const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
-        g.addColorStop(0, hexToRGBA(n.color, n.alpha));
-        g.addColorStop(0.6, hexToRGBA(n.color, n.alpha * 0.3));
-        g.addColorStop(1, 'transparent');
-        ctx.fillStyle = g;
-        ctx.fillRect(nx - nr, ny - nr, nr * 2, nr * 2);
+        const nx=cx+n.x*r*0.6+px*0.2, ny=cy+n.y*r*0.6+py*0.2, nr=n.r*r;
+        const g=ctx.createRadialGradient(nx,ny,0,nx,ny,nr);
+        g.addColorStop(0,hex2rgba(n.color,n.a));
+        g.addColorStop(0.6,hex2rgba(n.color,n.a*0.3));
+        g.addColorStop(1,'transparent');
+        ctx.fillStyle=g; ctx.fillRect(nx-nr,ny-nr,nr*2,nr*2);
       }
 
-      // Galaxy center glow
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const coreG = ctx.createRadialGradient(cx + px * 0.15, cy + py * 0.15, 0, cx, cy, r * 0.25);
-      coreG.addColorStop(0, 'rgba(255, 220, 180, 0.15)');
-      coreG.addColorStop(0.5, 'rgba(200, 150, 255, 0.06)');
-      coreG.addColorStop(1, 'transparent');
-      ctx.fillStyle = coreG;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      const cg=ctx.createRadialGradient(cx+px*0.15,cy+py*0.15,0,cx,cy,r*0.25);
+      cg.addColorStop(0,'rgba(255,220,180,0.15)');
+      cg.addColorStop(0.5,'rgba(200,150,255,0.06)');
+      cg.addColorStop(1,'transparent');
+      ctx.fillStyle=cg; ctx.fillRect(cx-r,cy-r,r*2,r*2);
       ctx.restore();
 
-      // Stars in spiral arms — batched rendering
-      const rotation = t * 0.03;
-      ctx.save();
+      const rot=t*0.03;
       for (const s of stars) {
-        const angle = s.angle + rotation;
-        const sx = cx + Math.cos(angle) * s.dist * r * 0.88 + px * 0.12;
-        const sy = cy + Math.sin(angle) * s.dist * r * 0.88 + py * 0.12;
-        const tw = 0.5 + Math.sin(t * 4 + s.twinkleOffset) * 0.5;
-
-        ctx.beginPath();
-        ctx.arc(sx, sy, s.size * tw, 0, Math.PI * 2);
-        ctx.fillStyle = s.color;
-        ctx.globalAlpha = s.brightness * tw;
-        ctx.fill();
+        const a=s.angle+rot;
+        const sx=cx+Math.cos(a)*s.dist*r*0.88+px*0.12;
+        const sy=cy+Math.sin(a)*s.dist*r*0.88+py*0.12;
+        const tw=0.5+Math.sin(t*4+s.twinkle)*0.5;
+        ctx.beginPath(); ctx.arc(sx,sy,s.size*tw,0,Math.PI*2);
+        ctx.fillStyle=s.color; ctx.globalAlpha=s.brightness*tw; ctx.fill();
       }
-      ctx.restore();
+      ctx.globalAlpha=1;
 
-      // Shooting star
-      if (Math.sin(t * 0.8) > 0.97) {
-        const sx = cx + Math.cos(t * 3.1) * r * 0.4;
-        const sy = cy + Math.sin(t * 2.3) * r * 0.3;
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(sx - 40, sy + 20);
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+      if (Math.sin(t*0.8)>0.97) {
+        ctx.save(); ctx.globalCompositeOperation='lighter';
+        ctx.beginPath(); ctx.moveTo(cx+Math.cos(t*3.1)*r*0.4,cy+Math.sin(t*2.3)*r*0.3);
+        ctx.lineTo(cx+Math.cos(t*3.1)*r*0.4-40,cy+Math.sin(t*2.3)*r*0.3+20);
+        ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=1.5; ctx.stroke();
         ctx.restore();
       }
     }
 
-    // ── FIRE (additive blending) ──
-    function drawFire(ctx, cx, cy, r, t, dt, px, py) {
-      // Dark base
-      const bg = ctx.createRadialGradient(cx + px * 0.2, cy + r * 0.3, 0, cx, cy, r);
-      bg.addColorStop(0, '#1a0500');
-      bg.addColorStop(0.5, '#200800');
-      bg.addColorStop(1, '#080000');
-      ctx.fillStyle = bg;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    function drawFire(ctx,cx,cy,r,t,dt,px,py) {
+      const bg=ctx.createRadialGradient(cx+px*0.2,cy+r*0.3,0,cx,cy,r);
+      bg.addColorStop(0,'#1a0500'); bg.addColorStop(0.5,'#200800'); bg.addColorStop(1,'#080000');
+      ctx.fillStyle=bg; ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-      // Lava base glow
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const lava = ctx.createLinearGradient(cx, cy + r * 0.3, cx, cy + r);
-      lava.addColorStop(0, 'transparent');
-      lava.addColorStop(0.5, 'rgba(255, 60, 0, 0.2)');
-      lava.addColorStop(1, 'rgba(255, 30, 0, 0.35)');
-      ctx.fillStyle = lava;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      const lv=ctx.createLinearGradient(cx,cy+r*0.3,cx,cy+r);
+      lv.addColorStop(0,'transparent'); lv.addColorStop(0.5,'rgba(255,60,0,0.2)'); lv.addColorStop(1,'rgba(255,30,0,0.35)');
+      ctx.fillStyle=lv; ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-      // Fire particles with additive blending
       for (const p of fires) {
-        p.y += p.vy * dt;
-        p.x += p.vx * dt + Math.sin(t * 4 + p.life * 8) * 0.0015;
-        p.life -= 0.007 * dt;
-
-        if (p.life <= 0 || p.y < -1.2) {
-          Object.assign(p, makeFire());
-          p.life = p.maxLife;
-        }
-
-        const fx = cx + p.x * r * 0.75 + px * 0.12;
-        const fy = cy + p.y * r * 0.65 + py * 0.12;
-        const lr = p.life / p.maxLife;
-
-        let color;
-        if (lr > 0.8) color = `rgba(255, 255, 200, ${lr})`;
-        else if (lr > 0.5) color = `rgba(255, 180, 30, ${lr})`;
-        else if (lr > 0.2) color = `rgba(255, 70, 0, ${lr * 0.9})`;
-        else color = `rgba(160, 15, 0, ${lr * 0.7})`;
-
-        ctx.beginPath();
-        ctx.arc(fx, fy, p.size * lr, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
+        p.y+=p.vy*dt; p.x+=p.vx*dt+Math.sin(t*4+p.life*8)*0.0015; p.life-=0.007*dt;
+        if (p.life<=0||p.y<-1.2) { Object.assign(p,mkFire()); p.life=p.ml; }
+        const fx=cx+p.x*r*0.75+px*0.12, fy=cy+p.y*r*0.65+py*0.12, lr=p.life/p.ml;
+        let c; if(lr>0.8) c=`rgba(255,255,200,${lr})`; else if(lr>0.5) c=`rgba(255,180,30,${lr})`; else if(lr>0.2) c=`rgba(255,70,0,${lr*0.9})`; else c=`rgba(160,15,0,${lr*0.7})`;
+        ctx.beginPath(); ctx.arc(fx,fy,p.size*lr,0,Math.PI*2); ctx.fillStyle=c; ctx.fill();
       }
       ctx.restore();
     }
 
-    // ── UNDERWATER ──
-    function drawUnderwater(ctx, cx, cy, r, t, dt, px, py) {
-      const bg = ctx.createLinearGradient(cx, cy - r, cx, cy + r);
-      bg.addColorStop(0, '#002035');
-      bg.addColorStop(0.4, '#003a50');
-      bg.addColorStop(1, '#001218');
-      ctx.fillStyle = bg;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    function drawUnderwater(ctx,cx,cy,r,t,dt,px,py) {
+      const bg=ctx.createLinearGradient(cx,cy-r,cx,cy+r);
+      bg.addColorStop(0,'#002035'); bg.addColorStop(0.4,'#003a50'); bg.addColorStop(1,'#001218');
+      ctx.fillStyle=bg; ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-      // Animated caustic light patterns
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < 12; i++) {
-        const cx2 = cx + Math.sin(t * 0.7 + i * 1.3) * r * 0.5 + px * 0.15;
-        const cy2 = cy + Math.cos(t * 0.5 + i * 1.7) * r * 0.4 + py * 0.15;
-        const cr = r * (0.15 + Math.sin(t + i) * 0.05);
-        const g = ctx.createRadialGradient(cx2, cy2, 0, cx2, cy2, cr);
-        g.addColorStop(0, `rgba(80, 200, 255, ${0.06 + Math.sin(t * 1.5 + i * 2) * 0.02})`);
-        g.addColorStop(1, 'transparent');
-        ctx.fillStyle = g;
-        ctx.fillRect(cx2 - cr, cy2 - cr, cr * 2, cr * 2);
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      for (let i=0;i<12;i++) {
+        const cx2=cx+Math.sin(t*0.7+i*1.3)*r*0.5+px*0.15;
+        const cy2=cy+Math.cos(t*0.5+i*1.7)*r*0.4+py*0.15;
+        const cr=r*(0.15+Math.sin(t+i)*0.05);
+        const g=ctx.createRadialGradient(cx2,cy2,0,cx2,cy2,cr);
+        g.addColorStop(0,`rgba(80,200,255,${0.06+Math.sin(t*1.5+i*2)*0.02})`);
+        g.addColorStop(1,'transparent');
+        ctx.fillStyle=g; ctx.fillRect(cx2-cr,cy2-cr,cr*2,cr*2);
       }
       ctx.restore();
 
-      // Bubbles
       for (const b of bubbles) {
-        b.y += b.vy * dt;
-        b.x += Math.sin(t * 1.8 + b.wobble) * 0.0015 * dt;
-        if (b.y < -1.3) { Object.assign(b, makeBubble()); b.y = 1.3; }
-
-        const bx = cx + b.x * r * 0.8 + px * 0.1;
-        const by = cy + b.y * r * 0.8 + py * 0.1;
-
-        ctx.beginPath();
-        ctx.arc(bx, by, b.size, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(140, 220, 255, ${b.alpha})`;
-        ctx.lineWidth = 0.7;
-        ctx.stroke();
-
-        // Highlight
-        ctx.beginPath();
-        ctx.arc(bx - b.size * 0.3, by - b.size * 0.3, b.size * 0.25, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${b.alpha * 0.5})`;
-        ctx.fill();
+        b.y+=b.vy*dt; b.x+=Math.sin(t*1.8+b.w)*0.0015*dt;
+        if (b.y<-1.3) { Object.assign(b,mkBub()); b.y=1.3; }
+        const bx=cx+b.x*r*0.8+px*0.1, by=cy+b.y*r*0.8+py*0.1;
+        ctx.beginPath(); ctx.arc(bx,by,b.size,0,Math.PI*2);
+        ctx.strokeStyle=`rgba(140,220,255,${b.a})`; ctx.lineWidth=0.7; ctx.stroke();
+        ctx.beginPath(); ctx.arc(bx-b.size*0.3,by-b.size*0.3,b.size*0.25,0,Math.PI*2);
+        ctx.fillStyle=`rgba(255,255,255,${b.a*0.5})`; ctx.fill();
       }
 
-      // Underwater fog at bottom
-      const fog = ctx.createLinearGradient(cx, cy + r * 0.4, cx, cy + r);
-      fog.addColorStop(0, 'transparent');
-      fog.addColorStop(1, 'rgba(0, 30, 50, 0.4)');
-      ctx.fillStyle = fog;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      const fog=ctx.createLinearGradient(cx,cy+r*0.4,cx,cy+r);
+      fog.addColorStop(0,'transparent'); fog.addColorStop(1,'rgba(0,30,50,0.4)');
+      ctx.fillStyle=fog; ctx.fillRect(cx-r,cy-r,r*2,r*2);
     }
 
-    // ── FOREST (god rays + depth) ──
-    function drawForest(ctx, cx, cy, r, t, dt, px, py) {
-      // Deep green background with atmospheric perspective
-      const bg = ctx.createRadialGradient(cx + px * 0.2, cy - r * 0.2 + py * 0.2, 0, cx, cy, r);
-      bg.addColorStop(0, '#0d250d');
-      bg.addColorStop(0.4, '#0a1f0a');
-      bg.addColorStop(1, '#050e05');
-      ctx.fillStyle = bg;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    function drawForest(ctx,cx,cy,r,t,dt,px,py) {
+      const bg=ctx.createRadialGradient(cx+px*0.2,cy-r*0.2+py*0.2,0,cx,cy,r);
+      bg.addColorStop(0,'#0d250d'); bg.addColorStop(0.4,'#0a1f0a'); bg.addColorStop(1,'#050e05');
+      ctx.fillStyle=bg; ctx.fillRect(cx-r,cy-r,r*2,r*2);
 
-      // God rays (volumetric light beams)
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < 7; i++) {
-        const rx = cx + (i / 7 - 0.5) * r * 1.5 + Math.sin(t * 0.2 + i) * 15 + px * 0.1;
-        const width = r * (0.06 + Math.sin(t * 0.3 + i * 1.2) * 0.02);
-        const rayAlpha = 0.04 + Math.sin(t * 0.5 + i * 0.8) * 0.015;
-
-        ctx.save();
-        ctx.translate(rx, cy - r);
-        ctx.rotate(-0.15 + i * 0.05);
-        const g = ctx.createLinearGradient(0, 0, 0, r * 2.2);
-        g.addColorStop(0, `rgba(220, 255, 170, ${rayAlpha})`);
-        g.addColorStop(0.6, `rgba(150, 255, 100, ${rayAlpha * 0.4})`);
-        g.addColorStop(1, 'transparent');
-        ctx.fillStyle = g;
-        ctx.fillRect(-width, 0, width * 2, r * 2.2);
-        ctx.restore();
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      for (let i=0;i<7;i++) {
+        const rx=cx+(i/7-0.5)*r*1.5+Math.sin(t*0.2+i)*15+px*0.1;
+        const w=r*(0.06+Math.sin(t*0.3+i*1.2)*0.02);
+        const ra=0.04+Math.sin(t*0.5+i*0.8)*0.015;
+        ctx.save(); ctx.translate(rx,cy-r); ctx.rotate(-0.15+i*0.05);
+        const g=ctx.createLinearGradient(0,0,0,r*2.2);
+        g.addColorStop(0,`rgba(220,255,170,${ra})`);
+        g.addColorStop(0.6,`rgba(150,255,100,${ra*0.4})`);
+        g.addColorStop(1,'transparent');
+        ctx.fillStyle=g; ctx.fillRect(-w,0,w*2,r*2.2); ctx.restore();
+      }
+      for (let i=0;i<25;i++) {
+        const mx=cx+Math.sin(t*0.3+i*2.5)*r*0.6+px*0.08;
+        const my=cy+Math.cos(t*0.2+i*1.7)*r*0.6+py*0.08;
+        ctx.beginPath(); ctx.arc(mx,my,1.2+Math.sin(t+i)*0.5,0,Math.PI*2);
+        ctx.fillStyle=`rgba(200,255,150,${0.15+Math.sin(t*2+i*3)*0.1})`; ctx.fill();
       }
       ctx.restore();
 
-      // Dust motes (floating particles)
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < 25; i++) {
-        const mx = cx + Math.sin(t * 0.3 + i * 2.5) * r * 0.6 + px * 0.08;
-        const my = cy + Math.cos(t * 0.2 + i * 1.7) * r * 0.6 + py * 0.08;
-        ctx.beginPath();
-        ctx.arc(mx, my, 1.2 + Math.sin(t + i) * 0.5, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(200, 255, 150, ${0.15 + Math.sin(t * 2 + i * 3) * 0.1})`;
-        ctx.fill();
-      }
-      ctx.restore();
-
-      // Falling leaves
-      for (const leaf of leaves) {
-        leaf.y += leaf.vy * dt;
-        leaf.x += leaf.vx * dt + Math.sin(t * 1.2 + leaf.rot) * 0.0008;
-        leaf.rot += leaf.rotV * dt;
-        if (leaf.y > 1.4) { Object.assign(leaf, makeLeaf()); leaf.y = -1.4; }
-
-        const lx = cx + leaf.x * r * 0.8 + px * 0.12;
-        const ly = cy + leaf.y * r * 0.8 + py * 0.12;
-
-        ctx.save();
-        ctx.translate(lx, ly);
-        ctx.rotate(leaf.rot);
-        ctx.fillStyle = leaf.color;
-        ctx.globalAlpha = 0.65;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, leaf.size, leaf.size * 0.35, 0, 0, Math.PI * 2);
-        ctx.fill();
+      for (const l of leaves) {
+        l.y+=l.vy*dt; l.x+=l.vx*dt+Math.sin(t*1.2+l.rot)*0.0008; l.rot+=l.rv*dt;
+        if (l.y>1.4) { Object.assign(l,mkLeaf()); l.y=-1.4; }
+        const lx=cx+l.x*r*0.8+px*0.12, ly=cy+l.y*r*0.8+py*0.12;
+        ctx.save(); ctx.translate(lx,ly); ctx.rotate(l.rot);
+        ctx.fillStyle=l.color; ctx.globalAlpha=0.65;
+        ctx.beginPath(); ctx.ellipse(0,0,l.size,l.size*0.35,0,0,Math.PI*2); ctx.fill();
         ctx.restore();
       }
     }
 
-    // ── CYBERPUNK (neon bloom) ──
-    function drawCyberpunk(ctx, cx, cy, r, t, dt, px, py) {
-      ctx.fillStyle = '#04000a';
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    function drawCyberpunk(ctx,cx,cy,r,t,dt,px,py) {
+      ctx.fillStyle='#04000a'; ctx.fillRect(cx-r,cy-r,r*2,r*2);
+      ctx.save(); ctx.globalCompositeOperation='lighter';
 
-      // Perspective grid
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-
-      // Horizontal lines
-      for (let i = 0; i < 22; i++) {
-        const y = cy + ((i / 22) * 2 - 1) * r + Math.sin(t * 0.4) * 3 + py * 0.1;
-        const a = 0.12 + Math.sin(t * 0.8 + i * 0.4) * 0.04;
-        ctx.beginPath();
-        ctx.moveTo(cx - r, y);
-        ctx.lineTo(cx + r, y);
-        ctx.strokeStyle = `rgba(168, 85, 247, ${a})`;
-        ctx.lineWidth = 0.7;
-        ctx.stroke();
+      for (let i=0;i<22;i++) {
+        const y=cy+((i/22)*2-1)*r+Math.sin(t*0.4)*3+py*0.1;
+        ctx.beginPath(); ctx.moveTo(cx-r,y); ctx.lineTo(cx+r,y);
+        ctx.strokeStyle=`rgba(168,85,247,${0.12+Math.sin(t*0.8+i*0.4)*0.04})`;
+        ctx.lineWidth=0.7; ctx.stroke();
       }
-      // Vertical lines
-      for (let i = 0; i < 16; i++) {
-        const x = cx + ((i / 16) * 2 - 1) * r + px * 0.1;
-        const a = 0.08 + Math.sin(t * 0.6 + i * 0.7) * 0.03;
-        ctx.beginPath();
-        ctx.moveTo(x, cy - r);
-        ctx.lineTo(x, cy + r);
-        ctx.strokeStyle = `rgba(236, 72, 153, ${a})`;
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
+      for (let i=0;i<16;i++) {
+        const x=cx+((i/16)*2-1)*r+px*0.1;
+        ctx.beginPath(); ctx.moveTo(x,cy-r); ctx.lineTo(x,cy+r);
+        ctx.strokeStyle=`rgba(236,72,153,${0.08+Math.sin(t*0.6+i*0.7)*0.03})`;
+        ctx.lineWidth=0.5; ctx.stroke();
       }
 
-      // Digital rain with trails
       for (const p of cybers) {
-        p.y += p.vy * dt;
-        if (p.y > 1.3) { p.y = -1.3; p.x = Math.random() * 2 - 1; }
-
-        const px2 = cx + p.x * r * 0.9 + px * 0.08;
-        const py2 = cy + p.y * r * 0.9 + py * 0.08;
-        const flicker = 0.6 + Math.sin(t * 7 + p.x * 15) * 0.4;
-
-        // Trail
-        ctx.beginPath();
-        ctx.moveTo(px2, py2);
-        ctx.lineTo(px2, py2 - p.size * 5);
-        ctx.strokeStyle = p.color;
-        ctx.globalAlpha = p.alpha * 0.25 * flicker;
-        ctx.lineWidth = p.size * 0.4;
-        ctx.stroke();
-
-        // Dot
-        ctx.beginPath();
-        ctx.arc(px2, py2, p.size, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.alpha * flicker;
-        ctx.fill();
+        p.y+=p.vy*dt; if(p.y>1.3){p.y=-1.3;p.x=Math.random()*2-1;}
+        const px2=cx+p.x*r*0.9+px*0.08, py2=cy+p.y*r*0.9+py*0.08;
+        const fl=0.6+Math.sin(t*7+p.x*15)*0.4;
+        ctx.beginPath(); ctx.moveTo(px2,py2); ctx.lineTo(px2,py2-p.size*5);
+        ctx.strokeStyle=p.color; ctx.globalAlpha=p.a*0.25*fl; ctx.lineWidth=p.size*0.4; ctx.stroke();
+        ctx.beginPath(); ctx.arc(px2,py2,p.size,0,Math.PI*2);
+        ctx.fillStyle=p.color; ctx.globalAlpha=p.a*fl; ctx.fill();
       }
 
-      // Central neon pulse
-      const pr = r * 0.35;
-      const pg = ctx.createRadialGradient(cx + px * 0.08, cy + py * 0.08, 0, cx, cy, pr);
-      const pp = 0.08 + Math.sin(t * 1.8) * 0.04;
-      pg.addColorStop(0, `rgba(168, 85, 247, ${pp})`);
-      pg.addColorStop(0.5, `rgba(236, 72, 153, ${pp * 0.5})`);
-      pg.addColorStop(1, 'transparent');
-      ctx.fillStyle = pg;
-      ctx.globalAlpha = 1;
-      ctx.fillRect(cx - pr, cy - pr, pr * 2, pr * 2);
+      const pr=r*0.35;
+      const pg=ctx.createRadialGradient(cx+px*0.08,cy+py*0.08,0,cx,cy,pr);
+      pg.addColorStop(0,`rgba(168,85,247,${0.08+Math.sin(t*1.8)*0.04})`);
+      pg.addColorStop(0.5,`rgba(236,72,153,${0.04+Math.sin(t*1.8)*0.02})`);
+      pg.addColorStop(1,'transparent');
+      ctx.fillStyle=pg; ctx.globalAlpha=1; ctx.fillRect(cx-pr,cy-pr,pr*2,pr*2);
 
-      // Scanline effect
-      for (let y = cy - r; y < cy + r; y += 3) {
-        ctx.fillStyle = 'rgba(0,0,0,0.08)';
-        ctx.fillRect(cx - r, y, r * 2, 1);
-      }
-
+      for (let y=cy-r;y<cy+r;y+=3) { ctx.fillStyle='rgba(0,0,0,0.08)'; ctx.fillRect(cx-r,y,r*2,1); }
       ctx.restore();
     }
 
-    // ─── UTILITY ───────────────────────────────────────
-    function hexToRGBA(hex, alpha) {
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r},${g},${b},${alpha})`;
+    // ═══════════════════════════════════════════════════
+    //  WORLD-SPECIFIC LEAK PARTICLES
+    // ═══════════════════════════════════════════════════
+    function drawLeaks(ctx,cx,cy,r,dt) {
+      ctx.save(); ctx.globalCompositeOperation='lighter';
+      for (const p of leaks) {
+        p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=0.014*dt;
+        if (p.life<=0) {
+          const a=Math.random()*Math.PI*2;
+          p.x=cx+Math.cos(a)*r; p.y=cy+Math.sin(a)*r;
+          p.vx=Math.cos(a)*(Math.random()*1.8+0.6);
+          p.vy=Math.sin(a)*(Math.random()*1.8+0.6);
+          p.life=1; p.size=Math.random()*3+1;
+        }
+        ctx.globalAlpha=p.life*0.5;
+
+        switch(S.world) {
+          case 0: // Galaxy — tiny stars
+            ctx.fillStyle='#fff';
+            ctx.beginPath(); ctx.arc(p.x,p.y,p.size*p.life*0.8,0,Math.PI*2); ctx.fill();
+            // cross flare
+            ctx.strokeStyle='rgba(200,180,255,0.3)'; ctx.lineWidth=0.5;
+            ctx.beginPath(); ctx.moveTo(p.x-3*p.life,p.y); ctx.lineTo(p.x+3*p.life,p.y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(p.x,p.y-3*p.life); ctx.lineTo(p.x,p.y+3*p.life); ctx.stroke();
+            break;
+          case 1: // Fire — embers
+            const lr=p.life;
+            ctx.fillStyle=lr>0.5?`rgba(255,200,50,${lr})`:`rgba(255,80,0,${lr})`;
+            ctx.beginPath(); ctx.arc(p.x,p.y,p.size*lr,0,Math.PI*2); ctx.fill();
+            // glow
+            ctx.fillStyle=`rgba(255,100,0,${lr*0.2})`;
+            ctx.beginPath(); ctx.arc(p.x,p.y,p.size*lr*3,0,Math.PI*2); ctx.fill();
+            break;
+          case 2: // Underwater — bubbles
+            ctx.strokeStyle=`rgba(150,230,255,${p.life*0.6})`;
+            ctx.lineWidth=0.6;
+            ctx.beginPath(); ctx.arc(p.x,p.y,p.size*1.2,0,Math.PI*2); ctx.stroke();
+            p.vy -= 0.03*dt; // bubbles float up
+            break;
+          case 3: // Forest — leaf bits
+            ctx.fillStyle=`rgba(100,220,80,${p.life*0.7})`;
+            ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(time*2+p.size);
+            ctx.beginPath(); ctx.ellipse(0,0,p.size*p.life,p.size*p.life*0.4,0,0,Math.PI*2); ctx.fill();
+            ctx.restore();
+            p.vy += 0.02*dt; // leaves fall
+            break;
+          case 4: // Cyberpunk — data fragments
+            ctx.fillStyle=['#ec4899','#a855f7','#06b6d4'][Math.floor(p.size)%3];
+            ctx.fillRect(p.x-1,p.y-1,p.size*p.life*1.5,2);
+            break;
+        }
+      }
+      ctx.restore();
     }
 
-    // ─── INIT ──────────────────────────────────────────
-    async function init() {
-      await initMediaPipe();
-      await startCamera();
-      render();
+    // ═══════════════════════════════════════════════════
+    //  UTIL
+    // ═══════════════════════════════════════════════════
+    function hex2rgba(hex,a) {
+      return `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${a})`;
     }
-    init();
+
+    // ═══════════════════════════════════════════════════
+    //  INIT
+    // ═══════════════════════════════════════════════════
+    (async () => { await initMP(); await startCam(); render(); })();
   </script>
 </body>
 </html>
