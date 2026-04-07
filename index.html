@@ -6,873 +6,903 @@
   <title>Finger Portal</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-
     body {
       background: #000;
       overflow: hidden;
       font-family: 'Segoe UI', system-ui, sans-serif;
-      cursor: none;
     }
-
-    #canvas {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-    }
-
-    video {
-      display: none;
-    }
-
+    canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+    video { display: none; }
     #loading {
-      position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
+      position: fixed; inset: 0;
       background: #000;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      z-index: 100;
-      color: #fff;
-      transition: opacity 0.5s;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 100; color: #fff;
+      transition: opacity 0.6s;
     }
-
-    #loading.hidden {
-      opacity: 0;
-      pointer-events: none;
-    }
-
+    #loading.hidden { opacity: 0; pointer-events: none; }
     .loader {
-      width: 60px;
-      height: 60px;
-      border: 3px solid rgba(255,255,255,0.1);
+      width: 50px; height: 50px;
+      border: 3px solid rgba(255,255,255,0.08);
       border-top-color: #a855f7;
       border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin-bottom: 20px;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 16px;
     }
-
     @keyframes spin { to { transform: rotate(360deg); } }
-
-    #loading p {
-      font-size: 14px;
-      opacity: 0.6;
-    }
-
+    #loading p { font-size: 13px; opacity: 0.5; }
     #world-label {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
       color: rgba(255,255,255,0.7);
-      font-size: 13px;
-      font-weight: 500;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      pointer-events: none;
-      z-index: 10;
-      transition: opacity 0.3s;
+      font-size: 12px; font-weight: 600; letter-spacing: 4px; text-transform: uppercase;
+      pointer-events: none; z-index: 10; transition: all 0.4s;
+      text-shadow: 0 0 20px currentColor;
     }
-
     #hint {
-      position: fixed;
-      top: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      color: rgba(255,255,255,0.4);
-      font-size: 12px;
-      letter-spacing: 1px;
-      pointer-events: none;
-      z-index: 10;
-      transition: opacity 0.5s;
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.35); font-size: 11px; letter-spacing: 1px;
+      pointer-events: none; z-index: 10; transition: opacity 0.8s;
     }
   </style>
 </head>
 <body>
-  <div id="loading">
-    <div class="loader"></div>
-    <p>Initializing hand tracking...</p>
-  </div>
+  <div id="loading"><div class="loader"></div><p>Loading hand tracking model...</p></div>
   <canvas id="canvas"></canvas>
   <video id="video" playsinline></video>
   <div id="world-label">GALAXY</div>
-  <div id="hint">Make a circle with thumb & index finger to open portal &nbsp;|&nbsp; Space / Arrow keys to switch worlds</div>
+  <div id="hint">Thumb + index finger circle = portal &nbsp;|&nbsp; Space / Arrows = switch world</div>
 
-  <!-- MediaPipe -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.min.js"></script>
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs';
 
-  <script>
-    // ─── Config ───────────────────────────────────────────
-    const CIRCLE_THRESHOLD = 0.13;  // max normalized distance to detect "circle" gesture
-    const MIN_PORTAL_RADIUS = 30;
-    const MAX_PORTAL_RADIUS = 400;
-    const PORTAL_OPEN_SPEED = 0.1;
-    const PORTAL_CLOSE_SPEED = 0.06;
-    const PARTICLE_COUNT = 15;
-    const STAR_COUNT = 400;
-    const LEAK_PARTICLE_COUNT = 12;
-    const TILT_SMOOTHING = 0.08;  // smoothing factor for parallax
-
-    // ─── State ────────────────────────────────────────────
-    const state = {
-      portalActive: false,
-      portalCenter: { x: 0, y: 0 },
-      portalTargetRadius: 0,
-      portalCurrentRadius: 0,
-      portalOpacity: 0,
-      handTilt: { x: 0, y: 0 },
-      currentWorld: 0,
-      worldNames: ['GALAXY', 'FIRE', 'UNDERWATER', 'FOREST', 'CYBERPUNK'],
-      worldColors: ['#a855f7', '#f97316', '#06b6d4', '#22c55e', '#ec4899'],
-      otherHandInPortal: false,
-      otherHandFingers: [],
-      justClosed: false,
-      burstFired: false,
-      burstParticles: [],
-      peaceSignCooldown: 0,
-      lastFrameTime: 0,
-      smoothTilt: { x: 0, y: 0 },
-      portalWasActive: false,
+    // ─── CONFIG ────────────────────────────────────────
+    const CFG = {
+      circleThreshold: 0.12,
+      minRadius: 25,
+      maxRadius: 420,
+      portalOpenSpeed: 0.09,
+      portalCloseSpeed: 0.055,
+      emaLandmark: 0.35,       // EMA smoothing for landmarks
+      emaTilt: 0.06,           // EMA smoothing for parallax tilt
+      gestureDebounce: 18,     // frames (~300ms) before portal state can change
+      starCount: 500,
+      fireCount: 250,
+      bubbleCount: 100,
+      leafCount: 70,
+      cyberCount: 120,
+      vortexCount: 40,         // particles swirling on portal rim
+      leakCount: 16,
     };
 
-    // ─── World Particles ──────────────────────────────────
-    // Galaxy
-    const stars = Array.from({ length: STAR_COUNT }, () => ({
-      x: Math.random() * 2 - 1,
-      y: Math.random() * 2 - 1,
-      size: Math.random() * 2.5 + 0.3,
-      brightness: Math.random(),
-      speed: Math.random() * 0.0003 + 0.0001,
-      angle: Math.random() * Math.PI * 2,
-      dist: Math.random(),
-    }));
+    // ─── STATE ─────────────────────────────────────────
+    const S = {
+      portalActive: false,
+      center: { x: 0, y: 0 },
+      targetR: 0,
+      currentR: 0,
+      opacity: 0,
+      tilt: { x: 0, y: 0 },
+      smoothTilt: { x: 0, y: 0 },
+      smoothCenter: { x: 0, y: 0 },
+      smoothR: 0,
+      world: 0,
+      worldNames: ['GALAXY', 'FIRE', 'UNDERWATER', 'FOREST', 'CYBERPUNK'],
+      worldColors: ['#a855f7', '#f97316', '#06b6d4', '#22c55e', '#ec4899'],
+      otherHandIn: false,
+      otherFingers: [],
+      burst: [],
+      debounce: 0,
+      peaceCooldown: 0,
+      wasActive: false,
+      burstFired: false,
+      lastFrame: 0,
+      // EMA-smoothed landmarks for the portal hand
+      smoothLandmarks: null,
+    };
 
-    const nebulaClouds = Array.from({ length: 8 }, () => ({
-      x: Math.random() * 2 - 1,
-      y: Math.random() * 2 - 1,
-      radius: Math.random() * 0.4 + 0.2,
-      color: ['#7c3aed', '#a855f7', '#3b82f6', '#6366f1', '#8b5cf6'][Math.floor(Math.random() * 5)],
-      opacity: Math.random() * 0.15 + 0.05,
+    // ─── WORLD DATA ────────────────────────────────────
+
+    // Galaxy — logarithmic spiral arms (Density Wave Theory)
+    const ARMS = 3;
+    const stars = Array.from({ length: CFG.starCount }, (_, i) => {
+      const arm = i % ARMS;
+      const t = Math.random();                         // 0..1 along arm
+      const armAngle = (arm / ARMS) * Math.PI * 2;
+      const spiral = armAngle + t * 4.5;               // logarithmic twist
+      const dist = 0.1 + t * 0.85;                     // distance from center
+      const scatter = (Math.random() - 0.5) * 0.25;    // scatter off arm center
+      return {
+        angle: spiral + scatter,
+        dist,
+        size: Math.random() * 2.2 + 0.4,
+        brightness: 0.3 + Math.random() * 0.7,
+        twinkleOffset: Math.random() * 100,
+        color: Math.random() > 0.85 ? (Math.random() > 0.5 ? '#aaccff' : '#ffccaa') : '#ffffff',
+      };
+    });
+    const nebulae = Array.from({ length: 10 }, () => ({
+      x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
+      r: Math.random() * 0.35 + 0.15,
+      color: ['#7c3aed', '#a855f7', '#3b82f6', '#6366f1', '#8b5cf6', '#c084fc'][Math.floor(Math.random() * 6)],
+      alpha: Math.random() * 0.12 + 0.04,
     }));
 
     // Fire
-    const fireParticles = Array.from({ length: 200 }, () => createFireParticle());
-    function createFireParticle() {
-      return {
-        x: Math.random() * 2 - 1,
-        y: Math.random() * 2 - 1,
-        vy: -(Math.random() * 0.015 + 0.005),
-        vx: (Math.random() - 0.5) * 0.004,
-        size: Math.random() * 6 + 2,
-        life: Math.random(),
-        maxLife: Math.random() * 0.6 + 0.4,
-      };
+    const fires = Array.from({ length: CFG.fireCount }, () => makeFire());
+    function makeFire() {
+      return { x: (Math.random() - 0.5) * 1.4, y: 0.5 + Math.random() * 0.6,
+        vx: (Math.random() - 0.5) * 0.003, vy: -(Math.random() * 0.014 + 0.005),
+        size: Math.random() * 5 + 2, life: 1, maxLife: Math.random() * 0.5 + 0.5 };
     }
 
     // Underwater
-    const bubbles = Array.from({ length: 80 }, () => createBubble());
-    function createBubble() {
-      return {
-        x: Math.random() * 2 - 1,
-        y: Math.random() * 2 - 1,
-        vy: -(Math.random() * 0.005 + 0.002),
-        vx: Math.sin(Math.random() * Math.PI * 2) * 0.001,
-        size: Math.random() * 5 + 1,
-        wobbleOffset: Math.random() * Math.PI * 2,
-        opacity: Math.random() * 0.5 + 0.2,
-      };
+    const bubbles = Array.from({ length: CFG.bubbleCount }, () => makeBubble());
+    function makeBubble() {
+      return { x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
+        vy: -(Math.random() * 0.005 + 0.002), size: Math.random() * 4.5 + 1,
+        wobble: Math.random() * Math.PI * 2, alpha: Math.random() * 0.45 + 0.15 };
     }
-
-    const causticLines = Array.from({ length: 15 }, () => ({
-      x: Math.random() * 2 - 1,
-      y: Math.random() * 2 - 1,
-      angle: Math.random() * Math.PI,
-      length: Math.random() * 0.5 + 0.2,
-      speed: Math.random() * 0.002 + 0.001,
-      opacity: Math.random() * 0.1 + 0.03,
-    }));
 
     // Forest
-    const leaves = Array.from({ length: 60 }, () => createLeaf());
-    function createLeaf() {
-      return {
-        x: Math.random() * 2 - 1,
-        y: Math.random() * 2 - 1,
-        vy: Math.random() * 0.004 + 0.001,
-        vx: Math.sin(Math.random() * Math.PI * 2) * 0.002,
-        rotation: Math.random() * Math.PI * 2,
-        rotSpeed: (Math.random() - 0.5) * 0.03,
-        size: Math.random() * 6 + 3,
-        color: ['#22c55e', '#16a34a', '#4ade80', '#86efac', '#a3e635'][Math.floor(Math.random() * 5)],
-      };
+    const leaves = Array.from({ length: CFG.leafCount }, () => makeLeaf());
+    function makeLeaf() {
+      return { x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
+        vy: Math.random() * 0.003 + 0.001, vx: (Math.random() - 0.5) * 0.002,
+        rot: Math.random() * Math.PI * 2, rotV: (Math.random() - 0.5) * 0.025,
+        size: Math.random() * 5 + 3,
+        color: ['#22c55e','#16a34a','#4ade80','#86efac','#a3e635','#65a30d'][Math.floor(Math.random() * 6)] };
     }
-
-    const lightRays = Array.from({ length: 6 }, () => ({
-      x: Math.random() * 2 - 1,
-      angle: -Math.PI / 4 + Math.random() * 0.3,
-      width: Math.random() * 0.15 + 0.05,
-      opacity: Math.random() * 0.08 + 0.02,
-      speed: Math.random() * 0.0005 + 0.0002,
-    }));
 
     // Cyberpunk
-    const cyberParticles = Array.from({ length: 100 }, () => ({
-      x: Math.random() * 2 - 1,
-      y: Math.random() * 2 - 1,
-      vy: Math.random() * 0.01 + 0.003,
-      size: Math.random() * 3 + 1,
-      color: ['#ec4899', '#a855f7', '#06b6d4', '#f472b6'][Math.floor(Math.random() * 4)],
-      opacity: Math.random() * 0.8 + 0.2,
+    const cybers = Array.from({ length: CFG.cyberCount }, () => ({
+      x: Math.random() * 2 - 1, y: Math.random() * 2 - 1,
+      vy: Math.random() * 0.009 + 0.003, size: Math.random() * 2.5 + 1,
+      color: ['#ec4899','#a855f7','#06b6d4','#f472b6','#818cf8'][Math.floor(Math.random() * 5)],
+      alpha: Math.random() * 0.7 + 0.3,
     }));
 
-    const gridLines = Array.from({ length: 20 }, (_, i) => ({
-      pos: (i / 20) * 2 - 1,
-      opacity: 0.15,
+    // Vortex rim particles
+    const vortex = Array.from({ length: CFG.vortexCount }, (_, i) => ({
+      angle: (i / CFG.vortexCount) * Math.PI * 2,
+      speed: 0.015 + Math.random() * 0.01,
+      offset: Math.random() * 8 - 4,
+      size: Math.random() * 2.5 + 1,
+      alpha: Math.random() * 0.6 + 0.3,
     }));
 
-    // Leaking particles (escape from portal edge)
-    const leakParticles = Array.from({ length: LEAK_PARTICLE_COUNT }, () => createLeakParticle(0, 0, 0));
-    function createLeakParticle(cx, cy, radius) {
-      const angle = Math.random() * Math.PI * 2;
-      return {
-        x: cx + Math.cos(angle) * radius,
-        y: cy + Math.sin(angle) * radius,
-        vx: Math.cos(angle) * (Math.random() * 1.5 + 0.5),
-        vy: Math.sin(angle) * (Math.random() * 1.5 + 0.5),
-        life: Math.random(),
-        maxLife: Math.random() * 0.5 + 0.5,
-        size: Math.random() * 3 + 1,
-        angle,
-      };
-    }
+    // Leak particles
+    const leaks = Array.from({ length: CFG.leakCount }, () => ({
+      x: 0, y: 0, vx: 0, vy: 0, life: 0, size: 2,
+    }));
 
-    // ─── Canvas Setup ─────────────────────────────────────
+    // ─── CANVAS ────────────────────────────────────────
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const video = document.getElementById('video');
 
+    // Offscreen canvas for world pre-rendering
+    const worldCanvas = document.createElement('canvas');
+    const wCtx = worldCanvas.getContext('2d');
+
     function resize() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
+      worldCanvas.width = 900;
+      worldCanvas.height = 900;
     }
     resize();
     window.addEventListener('resize', resize);
 
-    // ─── MediaPipe Setup ──────────────────────────────────
-    const hands = new Hands({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
-    });
+    // ─── MEDIAPIPE TASKS-VISION (Modern API) ───────────
+    let handLandmarker = null;
+    let lastVideoTime = -1;
 
-    hands.setOptions({
-      maxNumHands: 2,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.6,
-    });
+    async function initMediaPipe() {
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+      );
+      handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numHands: 2,
+        minHandDetectionConfidence: 0.6,
+        minHandPresenceConfidence: 0.6,
+        minTrackingConfidence: 0.5,
+      });
+    }
 
-    hands.onResults(onHandResults);
-
-    // ─── Camera ───────────────────────────────────────────
+    // ─── CAMERA ────────────────────────────────────────
     async function startCamera() {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: 1280, height: 720 }
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
       });
       video.srcObject = stream;
       await video.play();
-
-      const camera = new Camera(video, {
-        onFrame: async () => {
-          await hands.send({ image: video });
-        },
-        width: 1280,
-        height: 720,
-      });
-      camera.start();
-
-      setTimeout(() => {
-        document.getElementById('loading').classList.add('hidden');
-      }, 1500);
-
-      // Hide hint after 6 seconds
-      setTimeout(() => {
-        document.getElementById('hint').style.opacity = '0';
-      }, 6000);
+      document.getElementById('loading').classList.add('hidden');
+      setTimeout(() => { document.getElementById('hint').style.opacity = '0'; }, 7000);
+      detectLoop();
     }
 
-    startCamera();
+    // ─── DETECTION LOOP ────────────────────────────────
+    function detectLoop() {
+      if (video.currentTime !== lastVideoTime && handLandmarker) {
+        lastVideoTime = video.currentTime;
+        const results = handLandmarker.detectForVideo(video, performance.now());
+        processHands(results);
+      }
+      requestAnimationFrame(detectLoop);
+    }
 
-    // ─── Hand Processing ──────────────────────────────────
-    function onHandResults(results) {
-      const W = canvas.width;
-      const H = canvas.height;
+    // ─── EMA SMOOTHING ─────────────────────────────────
+    function emaSmooth(prev, curr, alpha) {
+      if (!prev) return curr.map(lm => ({ ...lm }));
+      return curr.map((lm, i) => ({
+        x: prev[i].x * (1 - alpha) + lm.x * alpha,
+        y: prev[i].y * (1 - alpha) + lm.y * alpha,
+        z: prev[i].z * (1 - alpha) + lm.z * alpha,
+      }));
+    }
 
-      // Reset
-      state.portalActive = false;
-      state.otherHandInPortal = false;
-      state.otherHandFingers = [];
+    // ─── HAND PROCESSING ───────────────────────────────
+    function processHands(results) {
+      const W = canvas.width, H = canvas.height;
+      S.portalActive = false;
+      S.otherHandIn = false;
+      S.otherFingers = [];
 
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        for (let h = 0; h < results.multiHandLandmarks.length; h++) {
-          const lm = results.multiHandLandmarks[h];
+      if (S.debounce > 0) S.debounce--;
+      if (S.peaceCooldown > 0) S.peaceCooldown--;
 
-          const thumbTip = lm[4];
-          const indexTip = lm[8];
-          const wrist = lm[0];
-          const middleBase = lm[9];
+      const hands = results.landmarks;
+      if (!hands || hands.length === 0) {
+        S.smoothLandmarks = null;
+        return;
+      }
 
-          // Distance between thumb and index (normalized)
-          const dx = thumbTip.x - indexTip.x;
-          const dy = thumbTip.y - indexTip.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
+      for (let h = 0; h < hands.length; h++) {
+        let lm = hands[h];
 
-          if (dist < CIRCLE_THRESHOLD && !state.portalActive) {
-            // Circle detected!
-            state.portalActive = true;
+        // Apply EMA smoothing to first hand (portal hand)
+        if (h === 0) {
+          S.smoothLandmarks = emaSmooth(S.smoothLandmarks, lm, CFG.emaLandmark);
+          lm = S.smoothLandmarks;
+        }
 
-            // Portal center = midpoint (mirrored for selfie view)
-            state.portalCenter.x = (1 - (thumbTip.x + indexTip.x) / 2) * W;
-            state.portalCenter.y = ((thumbTip.y + indexTip.y) / 2) * H;
+        const thumb = lm[4], index = lm[8], wrist = lm[0], midBase = lm[9];
+        const dx = thumb.x - index.x, dy = thumb.y - index.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
 
-            // Portal radius scales with hand size (distance from wrist to middle finger base)
-            const handSize = Math.sqrt(
-              Math.pow(wrist.x - middleBase.x, 2) + Math.pow(wrist.y - middleBase.y, 2)
-            );
-            state.portalTargetRadius = Math.min(MAX_PORTAL_RADIUS, Math.max(MIN_PORTAL_RADIUS, handSize * W * 1.2));
+        if (dist < CFG.circleThreshold && !S.portalActive) {
+          S.portalActive = true;
+          S.center.x = (1 - (thumb.x + index.x) / 2) * W;
+          S.center.y = ((thumb.y + index.y) / 2) * H;
 
-            // Hand tilt for parallax (raw values, smoothed in render loop)
-            const tiltX = (middleBase.x - wrist.x);
-            const tiltY = (middleBase.y - wrist.y);
-            state.handTilt.x = tiltX * 250;
-            state.handTilt.y = tiltY * 250;
-          }
+          const handSize = Math.sqrt(
+            Math.pow(wrist.x - midBase.x, 2) + Math.pow(wrist.y - midBase.y, 2)
+          );
+          S.targetR = Math.min(CFG.maxRadius, Math.max(CFG.minRadius, handSize * W * 1.3));
 
-          // Check if OTHER hand's fingers are inside portal
-          if (state.portalActive && h > 0) {
-            const fingers = [lm[4], lm[8], lm[12], lm[16], lm[20]];
-            for (const f of fingers) {
-              const fx = (1 - f.x) * W;
-              const fy = f.y * H;
-              const fdx = fx - state.portalCenter.x;
-              const fdy = fy - state.portalCenter.y;
-              if (Math.sqrt(fdx * fdx + fdy * fdy) < state.portalCurrentRadius) {
-                state.otherHandInPortal = true;
-                state.otherHandFingers.push({ x: fx, y: fy });
-              }
-            }
-          }
+          S.tilt.x = (midBase.x - wrist.x) * 280;
+          S.tilt.y = (midBase.y - wrist.y) * 280;
+        }
 
-          // Peace sign detection for world switching — only on the non-portal hand
-          if (state.peaceSignCooldown <= 0 && !(dist < CIRCLE_THRESHOLD)) {
-            const indexUp = lm[8].y < lm[6].y;
-            const middleUp = lm[12].y < lm[10].y;
-            const ringDown = lm[16].y > lm[14].y;
-            const pinkyDown = lm[20].y > lm[18].y;
-            const thumbIn = Math.abs(lm[4].x - lm[3].x) < 0.06;
-
-            if (indexUp && middleUp && ringDown && pinkyDown && thumbIn) {
-              state.currentWorld = (state.currentWorld + 1) % state.worldNames.length;
-              document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
-              state.peaceSignCooldown = 90; // ~1.5 second cooldown to prevent rapid switching
+        // Other hand in portal check
+        if (S.portalActive && h > 0) {
+          for (const idx of [4, 8, 12, 16, 20]) {
+            const f = lm[idx];
+            const fx = (1 - f.x) * W, fy = f.y * H;
+            const d = Math.sqrt((fx - S.smoothCenter.x) ** 2 + (fy - S.smoothCenter.y) ** 2);
+            if (d < S.currentR) {
+              S.otherHandIn = true;
+              S.otherFingers.push({ x: fx, y: fy });
             }
           }
         }
-      }
 
-      if (state.peaceSignCooldown > 0) state.peaceSignCooldown--;
+        // Peace sign — only non-portal hand
+        if (S.peaceCooldown <= 0 && !(dist < CFG.circleThreshold)) {
+          const iUp = lm[8].y < lm[6].y, mUp = lm[12].y < lm[10].y;
+          const rDn = lm[16].y > lm[14].y, pDn = lm[20].y > lm[18].y;
+          if (iUp && mUp && rDn && pDn) {
+            switchWorld(1);
+            S.peaceCooldown = 90;
+          }
+        }
+      }
     }
 
-    // ─── Render Loop ──────────────────────────────────────
+    function switchWorld(dir) {
+      S.world = (S.world + dir + S.worldNames.length) % S.worldNames.length;
+      document.getElementById('world-label').textContent = S.worldNames[S.world];
+    }
+
+    // ─── KEYBOARD ──────────────────────────────────────
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space' || e.code === 'ArrowRight') { e.preventDefault(); switchWorld(1); }
+      if (e.code === 'ArrowLeft') { e.preventDefault(); switchWorld(-1); }
+    });
+
+    // ─── RENDER ────────────────────────────────────────
     let time = 0;
 
     function render() {
       requestAnimationFrame(render);
       const now = performance.now();
-      const dt = Math.min((now - (state.lastFrameTime || now)) / 16.67, 3); // normalize to ~60fps
-      state.lastFrameTime = now;
+      const dt = Math.min((now - (S.lastFrame || now)) / 16.67, 3);
+      S.lastFrame = now;
       time += 0.016 * dt;
 
-      const W = canvas.width;
-      const H = canvas.height;
-
+      const W = canvas.width, H = canvas.height;
       ctx.clearRect(0, 0, W, H);
 
-      // ── Draw camera feed (mirrored) ──
+      // Camera feed (mirrored)
       ctx.save();
       ctx.translate(W, 0);
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, W, H);
       ctx.restore();
 
-      // ── Smooth tilt for parallax ──
-      state.smoothTilt.x += (state.handTilt.x - state.smoothTilt.x) * TILT_SMOOTHING * dt;
-      state.smoothTilt.y += (state.handTilt.y - state.smoothTilt.y) * TILT_SMOOTHING * dt;
+      // Smooth all portal values with EMA
+      S.smoothTilt.x += (S.tilt.x - S.smoothTilt.x) * CFG.emaTilt * dt;
+      S.smoothTilt.y += (S.tilt.y - S.smoothTilt.y) * CFG.emaTilt * dt;
+      S.smoothCenter.x += (S.center.x - S.smoothCenter.x) * 0.15 * dt;
+      S.smoothCenter.y += (S.center.y - S.smoothCenter.y) * 0.15 * dt;
 
-      // ── Smooth portal radius ──
-      if (state.portalActive) {
-        state.portalCurrentRadius += (state.portalTargetRadius - state.portalCurrentRadius) * PORTAL_OPEN_SPEED * dt;
-        state.portalOpacity = Math.min(1, state.portalOpacity + 0.06 * dt);
-        state.burstFired = false; // reset so burst can fire on next close
-        state.portalWasActive = true;
+      // Portal radius animation
+      if (S.portalActive) {
+        S.currentR += (S.targetR - S.currentR) * CFG.portalOpenSpeed * dt;
+        S.opacity = Math.min(1, S.opacity + 0.07 * dt);
+        S.burstFired = false;
+        S.wasActive = true;
       } else {
-        state.portalCurrentRadius *= (1 - PORTAL_CLOSE_SPEED * dt);
-        state.portalOpacity = Math.max(0, state.portalOpacity - 0.04 * dt);
+        S.currentR *= (1 - CFG.portalCloseSpeed * dt);
+        S.opacity = Math.max(0, S.opacity - 0.035 * dt);
 
-        // Spawn burst particles ONCE when portal starts closing
-        if (state.portalWasActive && !state.burstFired && state.portalCurrentRadius > 5) {
-          state.burstFired = true;
-          state.portalWasActive = false;
-          for (let i = 0; i < 25; i++) {
-            const angle = Math.random() * Math.PI * 2;
-            state.burstParticles.push({
-              x: state.portalCenter.x,
-              y: state.portalCenter.y,
-              vx: Math.cos(angle) * (Math.random() * 5 + 2),
-              vy: Math.sin(angle) * (Math.random() * 5 + 2),
-              life: 1,
-              size: Math.random() * 4 + 1.5,
-              color: state.worldColors[state.currentWorld],
+        if (S.wasActive && !S.burstFired && S.currentR > 8) {
+          S.burstFired = true;
+          S.wasActive = false;
+          for (let i = 0; i < 30; i++) {
+            const a = Math.random() * Math.PI * 2;
+            S.burst.push({
+              x: S.smoothCenter.x, y: S.smoothCenter.y,
+              vx: Math.cos(a) * (Math.random() * 5 + 2),
+              vy: Math.sin(a) * (Math.random() * 5 + 2),
+              life: 1, size: Math.random() * 4 + 1.5,
+              color: S.worldColors[S.world],
             });
           }
         }
-
-        if (state.portalCurrentRadius < 2) {
-          state.portalCurrentRadius = 0;
-        }
+        if (S.currentR < 2) S.currentR = 0;
       }
 
-      const r = state.portalCurrentRadius;
-      const cx = state.portalCenter.x;
-      const cy = state.portalCenter.y;
+      const r = S.currentR;
+      const cx = S.smoothCenter.x, cy = S.smoothCenter.y;
 
-      if (r > 3 && state.portalOpacity > 0.01) {
-        // ── Draw portal world inside clip ──
+      if (r > 4 && S.opacity > 0.01) {
+        // ── LIGHT SPILLAGE (portal tints surrounding camera feed) ──
         ctx.save();
-        ctx.globalAlpha = state.portalOpacity;
+        ctx.globalCompositeOperation = 'screen';
+        const spillR = r * 2.5;
+        const spill = ctx.createRadialGradient(cx, cy, r * 0.8, cx, cy, spillR);
+        spill.addColorStop(0, hexToRGBA(S.worldColors[S.world], 0.12));
+        spill.addColorStop(0.5, hexToRGBA(S.worldColors[S.world], 0.05));
+        spill.addColorStop(1, 'transparent');
+        ctx.fillStyle = spill;
+        ctx.fillRect(cx - spillR, cy - spillR, spillR * 2, spillR * 2);
+        ctx.restore();
 
-        // Circular clip
+        // ── SHADOW RING (anchors portal to reality) ──
+        ctx.save();
+        ctx.globalCompositeOperation = 'multiply';
+        const shadow = ctx.createRadialGradient(cx, cy, r, cx, cy, r + 35);
+        shadow.addColorStop(0, 'rgba(0,0,0,0)');
+        shadow.addColorStop(0.3, 'rgba(0,0,0,0.15)');
+        shadow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = shadow;
+        ctx.fillRect(cx - r - 40, cy - r - 40, (r + 40) * 2, (r + 40) * 2);
+        ctx.restore();
+
+        // ── RENDER WORLD INTO PORTAL CLIP ──
+        ctx.save();
+        ctx.globalAlpha = S.opacity;
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.clip();
 
-        // Draw current world
         drawWorld(ctx, cx, cy, r, time, dt);
 
-        // ── Portal vignette (darken edges for depth) ──
-        const vignette = ctx.createRadialGradient(cx, cy, r * 0.4, cx, cy, r);
-        vignette.addColorStop(0, 'transparent');
-        vignette.addColorStop(0.7, 'transparent');
-        vignette.addColorStop(1, 'rgba(0, 0, 0, 0.6)');
-        ctx.fillStyle = vignette;
+        // Portal vignette (depth)
+        const vig = ctx.createRadialGradient(cx, cy, r * 0.35, cx, cy, r);
+        vig.addColorStop(0, 'transparent');
+        vig.addColorStop(0.65, 'transparent');
+        vig.addColorStop(1, 'rgba(0,0,0,0.55)');
+        ctx.fillStyle = vig;
         ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-        // ── Reach-in distortion ──
-        if (state.otherHandInPortal) {
-          ctx.fillStyle = 'rgba(0,0,0,0.35)';
-          for (const f of state.otherHandFingers) {
-            const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 30);
-            grad.addColorStop(0, 'rgba(255,255,255,0.25)');
-            grad.addColorStop(1, 'rgba(0,0,0,0.4)');
-            ctx.fillStyle = grad;
+        // Reach-in distortion
+        if (S.otherHandIn) {
+          for (const f of S.otherFingers) {
+            const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 35);
+            g.addColorStop(0, 'rgba(255,255,255,0.3)');
+            g.addColorStop(0.4, 'rgba(255,255,255,0.1)');
+            g.addColorStop(1, 'rgba(0,0,0,0.35)');
+            ctx.fillStyle = g;
             ctx.beginPath();
-            ctx.arc(f.x, f.y, 30, 0, Math.PI * 2);
+            ctx.arc(f.x, f.y, 35, 0, Math.PI * 2);
             ctx.fill();
           }
         }
 
         ctx.restore();
 
-        // ── Edge glow ──
-        const glowColor = state.worldColors[state.currentWorld];
-        const pulseIntensity = 0.5 + Math.sin(time * 3) * 0.2;
+        // ── CHROMATIC ABERRATION at portal edge ──
+        drawChromaticRim(ctx, cx, cy, r);
 
-        for (let i = 3; i >= 1; i--) {
+        // ── VORTEX RIM PARTICLES (swirling on border) ──
+        drawVortex(ctx, cx, cy, r, time, dt);
+
+        // ── EDGE GLOW (layered additive) ──
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const glowCol = S.worldColors[S.world];
+        const pulse = 0.5 + Math.sin(time * 2.5) * 0.2;
+
+        for (let i = 4; i >= 1; i--) {
           ctx.beginPath();
-          ctx.arc(cx, cy, r + i * 6, 0, Math.PI * 2);
-          ctx.strokeStyle = glowColor;
-          ctx.globalAlpha = pulseIntensity * (0.3 / i) * state.portalOpacity;
-          ctx.lineWidth = 4;
+          ctx.arc(cx, cy, r + i * 5, 0, Math.PI * 2);
+          ctx.strokeStyle = glowCol;
+          ctx.globalAlpha = pulse * (0.2 / i) * S.opacity;
+          ctx.lineWidth = 3 + i;
           ctx.stroke();
         }
-
-        // Inner bright rim
+        // Bright inner rim
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.strokeStyle = '#fff';
-        ctx.globalAlpha = 0.4 * state.portalOpacity;
+        ctx.globalAlpha = 0.5 * S.opacity;
         ctx.lineWidth = 1.5;
         ctx.stroke();
+        ctx.restore();
 
-        ctx.globalAlpha = 1;
-
-        // ── Leaking particles ──
-        if (state.portalActive) {
-          drawLeakParticles(ctx, cx, cy, r, dt);
-        }
+        // ── LEAK PARTICLES ──
+        if (S.portalActive) drawLeaks(ctx, cx, cy, r, dt);
       }
 
-      // ── Burst particles (on close) ──
-      for (let i = state.burstParticles.length - 1; i >= 0; i--) {
-        const p = state.burstParticles[i];
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-        p.life -= 0.025 * dt;
-        if (p.life <= 0) {
-          state.burstParticles.splice(i, 1);
-          continue;
-        }
+      // Burst particles
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = S.burst.length - 1; i >= 0; i--) {
+        const p = S.burst[i];
+        p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.022 * dt;
+        if (p.life <= 0) { S.burst.splice(i, 1); continue; }
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
         ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.life * 0.8;
+        ctx.globalAlpha = p.life * 0.7;
         ctx.fill();
       }
-      ctx.globalAlpha = 1;
+      ctx.restore();
 
-      // ── World label glow ──
+      // World label
       const label = document.getElementById('world-label');
-      label.style.color = state.worldColors[state.currentWorld];
-      label.style.opacity = state.portalCurrentRadius > 5 ? '0.8' : '0.3';
+      label.style.color = S.worldColors[S.world];
+      label.style.opacity = S.currentR > 5 ? '0.8' : '0.25';
     }
 
-    // ─── Draw World Functions ─────────────────────────────
-    function drawWorld(ctx, cx, cy, r, time, dt) {
-      const px = state.smoothTilt.x;
-      const py = state.smoothTilt.y;
+    // ─── CHROMATIC ABERRATION ──────────────────────────
+    function drawChromaticRim(ctx, cx, cy, r) {
+      const strength = 3 + Math.sin(time * 2) * 1.5;
+      ctx.save();
+      ctx.globalAlpha = 0.25 * S.opacity;
+      ctx.globalCompositeOperation = 'lighter';
 
-      switch (state.currentWorld) {
-        case 0: drawGalaxy(ctx, cx, cy, r, time, px, py); break;
-        case 1: drawFire(ctx, cx, cy, r, time, dt, px, py); break;
-        case 2: drawUnderwater(ctx, cx, cy, r, time, dt, px, py); break;
-        case 3: drawForest(ctx, cx, cy, r, time, dt, px, py); break;
-        case 4: drawCyberpunk(ctx, cx, cy, r, time, dt, px, py); break;
+      // Red ring (shifted outward)
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + strength, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Blue ring (shifted inward)
+      ctx.beginPath();
+      ctx.arc(cx, cy, r - strength * 0.7, 0, Math.PI * 2);
+      ctx.strokeStyle = '#0066ff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // ─── VORTEX RIM PARTICLES ──────────────────────────
+    function drawVortex(ctx, cx, cy, r, t, dt) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const col = S.worldColors[S.world];
+
+      for (const v of vortex) {
+        v.angle += v.speed * dt;
+        const px = cx + Math.cos(v.angle) * (r + v.offset);
+        const py = cy + Math.sin(v.angle) * (r + v.offset);
+
+        ctx.beginPath();
+        ctx.arc(px, py, v.size, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.globalAlpha = v.alpha * S.opacity * (0.5 + Math.sin(t * 4 + v.angle * 3) * 0.3);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ─── LEAK PARTICLES ────────────────────────────────
+    function drawLeaks(ctx, cx, cy, r, dt) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const col = S.worldColors[S.world];
+
+      for (const p of leaks) {
+        p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.014 * dt;
+        if (p.life <= 0) {
+          const a = Math.random() * Math.PI * 2;
+          p.x = cx + Math.cos(a) * r;
+          p.y = cy + Math.sin(a) * r;
+          p.vx = Math.cos(a) * (Math.random() * 1.8 + 0.6);
+          p.vy = Math.sin(a) * (Math.random() * 1.8 + 0.6);
+          p.life = 1;
+          p.size = Math.random() * 3 + 1;
+        }
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.globalAlpha = p.life * 0.5;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ─── DRAW WORLD ────────────────────────────────────
+    function drawWorld(ctx, cx, cy, r, t, dt) {
+      const px = S.smoothTilt.x, py = S.smoothTilt.y;
+      switch (S.world) {
+        case 0: drawGalaxy(ctx, cx, cy, r, t, px, py); break;
+        case 1: drawFire(ctx, cx, cy, r, t, dt, px, py); break;
+        case 2: drawUnderwater(ctx, cx, cy, r, t, dt, px, py); break;
+        case 3: drawForest(ctx, cx, cy, r, t, dt, px, py); break;
+        case 4: drawCyberpunk(ctx, cx, cy, r, t, dt, px, py); break;
       }
     }
 
-    // ── Galaxy ──
-    function drawGalaxy(ctx, cx, cy, r, time, px, py) {
-      // Background
+    // ── GALAXY (spiral arms) ──
+    function drawGalaxy(ctx, cx, cy, r, t, px, py) {
+      // Deep space background
       const bg = ctx.createRadialGradient(cx + px * 0.3, cy + py * 0.3, 0, cx, cy, r);
-      bg.addColorStop(0, '#0a0015');
-      bg.addColorStop(0.5, '#0f0030');
-      bg.addColorStop(1, '#000010');
+      bg.addColorStop(0, '#0c0020');
+      bg.addColorStop(0.4, '#08001a');
+      bg.addColorStop(1, '#020008');
       ctx.fillStyle = bg;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
       // Nebula clouds
-      for (const cloud of nebulaClouds) {
-        const nx = cx + cloud.x * r * 0.7 + px * 0.2;
-        const ny = cy + cloud.y * r * 0.7 + py * 0.2;
-        const nr = cloud.radius * r;
-        const grad = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
-        grad.addColorStop(0, cloud.color + '40');
-        grad.addColorStop(0.5, cloud.color + '15');
-        grad.addColorStop(1, 'transparent');
-        ctx.fillStyle = grad;
+      for (const n of nebulae) {
+        const nx = cx + n.x * r * 0.6 + px * 0.2, ny = cy + n.y * r * 0.6 + py * 0.2;
+        const nr = n.r * r;
+        const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
+        g.addColorStop(0, hexToRGBA(n.color, n.alpha));
+        g.addColorStop(0.6, hexToRGBA(n.color, n.alpha * 0.3));
+        g.addColorStop(1, 'transparent');
+        ctx.fillStyle = g;
         ctx.fillRect(nx - nr, ny - nr, nr * 2, nr * 2);
       }
 
-      // Stars with rotation
-      for (const star of stars) {
-        star.angle += star.speed;
-        const sx = cx + Math.cos(star.angle) * star.dist * r * 0.9 + px * 0.15;
-        const sy = cy + Math.sin(star.angle) * star.dist * r * 0.9 + py * 0.15;
-        const twinkle = 0.5 + Math.sin(time * 5 + star.brightness * 100) * 0.5;
+      // Galaxy center glow
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const coreG = ctx.createRadialGradient(cx + px * 0.15, cy + py * 0.15, 0, cx, cy, r * 0.25);
+      coreG.addColorStop(0, 'rgba(255, 220, 180, 0.15)');
+      coreG.addColorStop(0.5, 'rgba(200, 150, 255, 0.06)');
+      coreG.addColorStop(1, 'transparent');
+      ctx.fillStyle = coreG;
+      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      ctx.restore();
+
+      // Stars in spiral arms — batched rendering
+      const rotation = t * 0.03;
+      ctx.save();
+      for (const s of stars) {
+        const angle = s.angle + rotation;
+        const sx = cx + Math.cos(angle) * s.dist * r * 0.88 + px * 0.12;
+        const sy = cy + Math.sin(angle) * s.dist * r * 0.88 + py * 0.12;
+        const tw = 0.5 + Math.sin(t * 4 + s.twinkleOffset) * 0.5;
+
         ctx.beginPath();
-        ctx.arc(sx, sy, star.size * twinkle, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${star.brightness * twinkle})`;
+        ctx.arc(sx, sy, s.size * tw, 0, Math.PI * 2);
+        ctx.fillStyle = s.color;
+        ctx.globalAlpha = s.brightness * tw;
         ctx.fill();
       }
+      ctx.restore();
 
-      // Shooting star occasionally
-      if (Math.sin(time * 0.7) > 0.98) {
-        const sx = cx + Math.cos(time * 3) * r * 0.5;
-        const sy = cy + Math.sin(time * 2) * r * 0.3;
+      // Shooting star
+      if (Math.sin(t * 0.8) > 0.97) {
+        const sx = cx + Math.cos(t * 3.1) * r * 0.4;
+        const sy = cy + Math.sin(t * 2.3) * r * 0.3;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
         ctx.beginPath();
         ctx.moveTo(sx, sy);
-        ctx.lineTo(sx - 30, sy + 15);
-        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+        ctx.lineTo(sx - 40, sy + 20);
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
+        ctx.restore();
       }
     }
 
-    // ── Fire ──
-    function drawFire(ctx, cx, cy, r, time, dt, px, py) {
-      // Background — dark red/orange
-      const bg = ctx.createRadialGradient(cx + px * 0.2, cy + r * 0.3 + py * 0.2, 0, cx, cy, r);
+    // ── FIRE (additive blending) ──
+    function drawFire(ctx, cx, cy, r, t, dt, px, py) {
+      // Dark base
+      const bg = ctx.createRadialGradient(cx + px * 0.2, cy + r * 0.3, 0, cx, cy, r);
       bg.addColorStop(0, '#1a0500');
-      bg.addColorStop(0.6, '#2d0a00');
-      bg.addColorStop(1, '#0a0000');
+      bg.addColorStop(0.5, '#200800');
+      bg.addColorStop(1, '#080000');
       ctx.fillStyle = bg;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
       // Lava base glow
-      const lavaGrad = ctx.createLinearGradient(cx, cy + r * 0.5, cx, cy + r);
-      lavaGrad.addColorStop(0, 'transparent');
-      lavaGrad.addColorStop(0.5, 'rgba(255, 80, 0, 0.3)');
-      lavaGrad.addColorStop(1, 'rgba(255, 40, 0, 0.5)');
-      ctx.fillStyle = lavaGrad;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const lava = ctx.createLinearGradient(cx, cy + r * 0.3, cx, cy + r);
+      lava.addColorStop(0, 'transparent');
+      lava.addColorStop(0.5, 'rgba(255, 60, 0, 0.2)');
+      lava.addColorStop(1, 'rgba(255, 30, 0, 0.35)');
+      ctx.fillStyle = lava;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-      // Fire particles
-      for (const p of fireParticles) {
+      // Fire particles with additive blending
+      for (const p of fires) {
         p.y += p.vy * dt;
-        p.x += p.vx * dt + Math.sin(time * 5 + p.life * 10) * 0.002;
-        p.life -= 0.008 * dt;
+        p.x += p.vx * dt + Math.sin(t * 4 + p.life * 8) * 0.0015;
+        p.life -= 0.007 * dt;
 
-        if (p.life <= 0 || p.y < -1) {
-          Object.assign(p, createFireParticle());
-          p.y = 1 + Math.random() * 0.3;
-          p.x = (Math.random() * 2 - 1) * 0.8;
+        if (p.life <= 0 || p.y < -1.2) {
+          Object.assign(p, makeFire());
           p.life = p.maxLife;
         }
 
-        const fx = cx + p.x * r * 0.8 + px * 0.15;
-        const fy = cy + p.y * r * 0.7 + py * 0.15;
-        const lifeRatio = p.life / p.maxLife;
+        const fx = cx + p.x * r * 0.75 + px * 0.12;
+        const fy = cy + p.y * r * 0.65 + py * 0.12;
+        const lr = p.life / p.maxLife;
 
-        // Color: white core → yellow → orange → red
         let color;
-        if (lifeRatio > 0.8) color = `rgba(255, 255, 200, ${lifeRatio})`;
-        else if (lifeRatio > 0.5) color = `rgba(255, 180, 30, ${lifeRatio})`;
-        else if (lifeRatio > 0.2) color = `rgba(255, 80, 0, ${lifeRatio})`;
-        else color = `rgba(180, 20, 0, ${lifeRatio})`;
+        if (lr > 0.8) color = `rgba(255, 255, 200, ${lr})`;
+        else if (lr > 0.5) color = `rgba(255, 180, 30, ${lr})`;
+        else if (lr > 0.2) color = `rgba(255, 70, 0, ${lr * 0.9})`;
+        else color = `rgba(160, 15, 0, ${lr * 0.7})`;
 
         ctx.beginPath();
-        ctx.arc(fx, fy, p.size * lifeRatio, 0, Math.PI * 2);
+        ctx.arc(fx, fy, p.size * lr, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
       }
+      ctx.restore();
     }
 
-    // ── Underwater ──
-    function drawUnderwater(ctx, cx, cy, r, time, dt, px, py) {
-      // Background — deep blue-green gradient
+    // ── UNDERWATER ──
+    function drawUnderwater(ctx, cx, cy, r, t, dt, px, py) {
       const bg = ctx.createLinearGradient(cx, cy - r, cx, cy + r);
-      bg.addColorStop(0, '#001a2e');
-      bg.addColorStop(0.5, '#003344');
-      bg.addColorStop(1, '#001520');
+      bg.addColorStop(0, '#002035');
+      bg.addColorStop(0.4, '#003a50');
+      bg.addColorStop(1, '#001218');
       ctx.fillStyle = bg;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-      // Caustic light effect
-      for (const c of causticLines) {
-        c.x += Math.sin(time + c.opacity * 100) * c.speed;
-        const lx = cx + c.x * r * 0.6 + px * 0.2;
-        const ly = cy + c.y * r * 0.6 + py * 0.2;
-
-        ctx.save();
-        ctx.translate(lx, ly);
-        ctx.rotate(c.angle + Math.sin(time * 0.5) * 0.3);
-        ctx.fillStyle = `rgba(100, 220, 255, ${c.opacity + Math.sin(time * 2 + c.x * 5) * 0.03})`;
-        ctx.fillRect(-c.length * r * 0.3, -1, c.length * r * 0.6, 2);
-        ctx.restore();
+      // Animated caustic light patterns
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 12; i++) {
+        const cx2 = cx + Math.sin(t * 0.7 + i * 1.3) * r * 0.5 + px * 0.15;
+        const cy2 = cy + Math.cos(t * 0.5 + i * 1.7) * r * 0.4 + py * 0.15;
+        const cr = r * (0.15 + Math.sin(t + i) * 0.05);
+        const g = ctx.createRadialGradient(cx2, cy2, 0, cx2, cy2, cr);
+        g.addColorStop(0, `rgba(80, 200, 255, ${0.06 + Math.sin(t * 1.5 + i * 2) * 0.02})`);
+        g.addColorStop(1, 'transparent');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx2 - cr, cy2 - cr, cr * 2, cr * 2);
       }
+      ctx.restore();
 
       // Bubbles
       for (const b of bubbles) {
         b.y += b.vy * dt;
-        b.x += Math.sin(time * 2 + b.wobbleOffset) * 0.002 * dt;
-
-        if (b.y < -1.2) {
-          Object.assign(b, createBubble());
-          b.y = 1.2;
-        }
+        b.x += Math.sin(t * 1.8 + b.wobble) * 0.0015 * dt;
+        if (b.y < -1.3) { Object.assign(b, makeBubble()); b.y = 1.3; }
 
         const bx = cx + b.x * r * 0.8 + px * 0.1;
         const by = cy + b.y * r * 0.8 + py * 0.1;
 
         ctx.beginPath();
         ctx.arc(bx, by, b.size, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(150, 230, 255, ${b.opacity})`;
-        ctx.lineWidth = 0.8;
+        ctx.strokeStyle = `rgba(140, 220, 255, ${b.alpha})`;
+        ctx.lineWidth = 0.7;
         ctx.stroke();
 
         // Highlight
         ctx.beginPath();
-        ctx.arc(bx - b.size * 0.3, by - b.size * 0.3, b.size * 0.3, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255, 255, 255, ${b.opacity * 0.5})`;
+        ctx.arc(bx - b.size * 0.3, by - b.size * 0.3, b.size * 0.25, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${b.alpha * 0.5})`;
         ctx.fill();
       }
+
+      // Underwater fog at bottom
+      const fog = ctx.createLinearGradient(cx, cy + r * 0.4, cx, cy + r);
+      fog.addColorStop(0, 'transparent');
+      fog.addColorStop(1, 'rgba(0, 30, 50, 0.4)');
+      ctx.fillStyle = fog;
+      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
     }
 
-    // ── Forest ──
-    function drawForest(ctx, cx, cy, r, time, dt, px, py) {
-      // Background — deep green
-      const bg = ctx.createRadialGradient(cx + px * 0.2, cy - r * 0.3 + py * 0.2, 0, cx, cy, r);
-      bg.addColorStop(0, '#0a1f0a');
-      bg.addColorStop(0.5, '#0d2e0d');
-      bg.addColorStop(1, '#061006');
+    // ── FOREST (god rays + depth) ──
+    function drawForest(ctx, cx, cy, r, t, dt, px, py) {
+      // Deep green background with atmospheric perspective
+      const bg = ctx.createRadialGradient(cx + px * 0.2, cy - r * 0.2 + py * 0.2, 0, cx, cy, r);
+      bg.addColorStop(0, '#0d250d');
+      bg.addColorStop(0.4, '#0a1f0a');
+      bg.addColorStop(1, '#050e05');
       ctx.fillStyle = bg;
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-      // Light rays from top
-      for (const ray of lightRays) {
-        ray.x += Math.sin(time * 0.3 + ray.opacity * 50) * ray.speed;
-        const rx = cx + ray.x * r * 0.5 + px * 0.1;
-        const ry = cy - r;
-        const rayLen = r * 2.5;
+      // God rays (volumetric light beams)
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 7; i++) {
+        const rx = cx + (i / 7 - 0.5) * r * 1.5 + Math.sin(t * 0.2 + i) * 15 + px * 0.1;
+        const width = r * (0.06 + Math.sin(t * 0.3 + i * 1.2) * 0.02);
+        const rayAlpha = 0.04 + Math.sin(t * 0.5 + i * 0.8) * 0.015;
 
         ctx.save();
-        ctx.translate(rx, ry);
-        ctx.rotate(ray.angle);
-        const grad = ctx.createLinearGradient(0, 0, 0, rayLen);
-        grad.addColorStop(0, `rgba(200, 255, 150, ${ray.opacity + Math.sin(time + ray.x * 3) * 0.02})`);
-        grad.addColorStop(1, 'transparent');
-        ctx.fillStyle = grad;
-        ctx.fillRect(-ray.width * r, 0, ray.width * r * 2, rayLen);
+        ctx.translate(rx, cy - r);
+        ctx.rotate(-0.15 + i * 0.05);
+        const g = ctx.createLinearGradient(0, 0, 0, r * 2.2);
+        g.addColorStop(0, `rgba(220, 255, 170, ${rayAlpha})`);
+        g.addColorStop(0.6, `rgba(150, 255, 100, ${rayAlpha * 0.4})`);
+        g.addColorStop(1, 'transparent');
+        ctx.fillStyle = g;
+        ctx.fillRect(-width, 0, width * 2, r * 2.2);
         ctx.restore();
       }
+      ctx.restore();
+
+      // Dust motes (floating particles)
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 25; i++) {
+        const mx = cx + Math.sin(t * 0.3 + i * 2.5) * r * 0.6 + px * 0.08;
+        const my = cy + Math.cos(t * 0.2 + i * 1.7) * r * 0.6 + py * 0.08;
+        ctx.beginPath();
+        ctx.arc(mx, my, 1.2 + Math.sin(t + i) * 0.5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200, 255, 150, ${0.15 + Math.sin(t * 2 + i * 3) * 0.1})`;
+        ctx.fill();
+      }
+      ctx.restore();
 
       // Falling leaves
       for (const leaf of leaves) {
         leaf.y += leaf.vy * dt;
-        leaf.x += leaf.vx * dt + Math.sin(time * 1.5 + leaf.rotation) * 0.001;
-        leaf.rotation += leaf.rotSpeed * dt;
+        leaf.x += leaf.vx * dt + Math.sin(t * 1.2 + leaf.rot) * 0.0008;
+        leaf.rot += leaf.rotV * dt;
+        if (leaf.y > 1.4) { Object.assign(leaf, makeLeaf()); leaf.y = -1.4; }
 
-        if (leaf.y > 1.3) {
-          Object.assign(leaf, createLeaf());
-          leaf.y = -1.3;
-        }
-
-        const lx = cx + leaf.x * r * 0.8 + px * 0.15;
-        const ly = cy + leaf.y * r * 0.8 + py * 0.15;
+        const lx = cx + leaf.x * r * 0.8 + px * 0.12;
+        const ly = cy + leaf.y * r * 0.8 + py * 0.12;
 
         ctx.save();
         ctx.translate(lx, ly);
-        ctx.rotate(leaf.rotation);
+        ctx.rotate(leaf.rot);
         ctx.fillStyle = leaf.color;
-        ctx.globalAlpha = 0.7;
-        // Leaf shape
+        ctx.globalAlpha = 0.65;
         ctx.beginPath();
-        ctx.ellipse(0, 0, leaf.size, leaf.size * 0.4, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, 0, leaf.size, leaf.size * 0.35, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = 1;
         ctx.restore();
       }
     }
 
-    // ── Cyberpunk ──
-    function drawCyberpunk(ctx, cx, cy, r, time, dt, px, py) {
-      // Background — dark purple
-      ctx.fillStyle = '#05000a';
+    // ── CYBERPUNK (neon bloom) ──
+    function drawCyberpunk(ctx, cx, cy, r, t, dt, px, py) {
+      ctx.fillStyle = '#04000a';
       ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
-      // Neon grid — horizontal lines with perspective
-      for (let i = 0; i < 20; i++) {
-        const yRatio = i / 20;
-        const lineY = cy + (yRatio * 2 - 1) * r + Math.sin(time * 0.5) * 5 + py * 0.15;
-        const opacity = 0.15 + Math.sin(time + i * 0.5) * 0.05;
+      // Perspective grid
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
 
+      // Horizontal lines
+      for (let i = 0; i < 22; i++) {
+        const y = cy + ((i / 22) * 2 - 1) * r + Math.sin(t * 0.4) * 3 + py * 0.1;
+        const a = 0.12 + Math.sin(t * 0.8 + i * 0.4) * 0.04;
         ctx.beginPath();
-        ctx.moveTo(cx - r, lineY);
-        ctx.lineTo(cx + r, lineY);
-        ctx.strokeStyle = `rgba(168, 85, 247, ${opacity})`;
-        ctx.lineWidth = 0.8;
+        ctx.moveTo(cx - r, y);
+        ctx.lineTo(cx + r, y);
+        ctx.strokeStyle = `rgba(168, 85, 247, ${a})`;
+        ctx.lineWidth = 0.7;
         ctx.stroke();
       }
-
-      // Vertical grid lines
-      for (let i = 0; i < 15; i++) {
-        const xRatio = i / 15;
-        const lineX = cx + (xRatio * 2 - 1) * r + px * 0.15;
-        const opacity = 0.1 + Math.sin(time * 0.7 + i) * 0.04;
-
+      // Vertical lines
+      for (let i = 0; i < 16; i++) {
+        const x = cx + ((i / 16) * 2 - 1) * r + px * 0.1;
+        const a = 0.08 + Math.sin(t * 0.6 + i * 0.7) * 0.03;
         ctx.beginPath();
-        ctx.moveTo(lineX, cy - r);
-        ctx.lineTo(lineX, cy + r);
-        ctx.strokeStyle = `rgba(236, 72, 153, ${opacity})`;
+        ctx.moveTo(x, cy - r);
+        ctx.lineTo(x, cy + r);
+        ctx.strokeStyle = `rgba(236, 72, 153, ${a})`;
         ctx.lineWidth = 0.5;
         ctx.stroke();
       }
 
-      // Digital rain particles
-      for (const p of cyberParticles) {
+      // Digital rain with trails
+      for (const p of cybers) {
         p.y += p.vy * dt;
-        if (p.y > 1.2) {
-          p.y = -1.2;
-          p.x = Math.random() * 2 - 1;
-        }
+        if (p.y > 1.3) { p.y = -1.3; p.x = Math.random() * 2 - 1; }
 
-        const px2 = cx + p.x * r * 0.9 + px * 0.1;
-        const py2 = cy + p.y * r * 0.9 + py * 0.1;
-
-        ctx.beginPath();
-        ctx.arc(px2, py2, p.size, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.opacity * (0.7 + Math.sin(time * 8 + p.x * 20) * 0.3);
-        ctx.fill();
+        const px2 = cx + p.x * r * 0.9 + px * 0.08;
+        const py2 = cy + p.y * r * 0.9 + py * 0.08;
+        const flicker = 0.6 + Math.sin(t * 7 + p.x * 15) * 0.4;
 
         // Trail
         ctx.beginPath();
         ctx.moveTo(px2, py2);
-        ctx.lineTo(px2, py2 - p.size * 4);
+        ctx.lineTo(px2, py2 - p.size * 5);
         ctx.strokeStyle = p.color;
-        ctx.globalAlpha = p.opacity * 0.3;
-        ctx.lineWidth = p.size * 0.5;
+        ctx.globalAlpha = p.alpha * 0.25 * flicker;
+        ctx.lineWidth = p.size * 0.4;
         ctx.stroke();
-      }
 
-      ctx.globalAlpha = 1;
-
-      // Center glow pulse
-      const glowR = r * 0.4;
-      const pulseGrad = ctx.createRadialGradient(cx + px * 0.1, cy + py * 0.1, 0, cx, cy, glowR);
-      const pulse = 0.1 + Math.sin(time * 2) * 0.05;
-      pulseGrad.addColorStop(0, `rgba(168, 85, 247, ${pulse})`);
-      pulseGrad.addColorStop(1, 'transparent');
-      ctx.fillStyle = pulseGrad;
-      ctx.fillRect(cx - glowR, cy - glowR, glowR * 2, glowR * 2);
-    }
-
-    // ─── Leak Particles ───────────────────────────────────
-    function drawLeakParticles(ctx, cx, cy, r, dt) {
-      const color = state.worldColors[state.currentWorld];
-
-      for (const p of leakParticles) {
-        p.x += p.vx * dt;
-        p.y += p.vy * dt;
-        p.life -= 0.015 * dt;
-
-        if (p.life <= 0) {
-          // Reset at portal edge
-          const angle = Math.random() * Math.PI * 2;
-          p.x = cx + Math.cos(angle) * r;
-          p.y = cy + Math.sin(angle) * r;
-          p.vx = Math.cos(angle) * (Math.random() * 1.5 + 0.5);
-          p.vy = Math.sin(angle) * (Math.random() * 1.5 + 0.5);
-          p.life = 1;
-          p.size = Math.random() * 3 + 1;
-        }
-
+        // Dot
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = p.life * 0.6;
+        ctx.arc(px2, py2, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha * flicker;
         ctx.fill();
       }
+
+      // Central neon pulse
+      const pr = r * 0.35;
+      const pg = ctx.createRadialGradient(cx + px * 0.08, cy + py * 0.08, 0, cx, cy, pr);
+      const pp = 0.08 + Math.sin(t * 1.8) * 0.04;
+      pg.addColorStop(0, `rgba(168, 85, 247, ${pp})`);
+      pg.addColorStop(0.5, `rgba(236, 72, 153, ${pp * 0.5})`);
+      pg.addColorStop(1, 'transparent');
+      ctx.fillStyle = pg;
       ctx.globalAlpha = 1;
+      ctx.fillRect(cx - pr, cy - pr, pr * 2, pr * 2);
+
+      // Scanline effect
+      for (let y = cy - r; y < cy + r; y += 3) {
+        ctx.fillStyle = 'rgba(0,0,0,0.08)';
+        ctx.fillRect(cx - r, y, r * 2, 1);
+      }
+
+      ctx.restore();
     }
 
-    // ─── Keyboard Controls (fallback) ──────────────────────
-    document.addEventListener('keydown', (e) => {
-      if (e.code === 'Space' || e.code === 'ArrowRight') {
-        e.preventDefault();
-        state.currentWorld = (state.currentWorld + 1) % state.worldNames.length;
-        document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
-      }
-      if (e.code === 'ArrowLeft') {
-        e.preventDefault();
-        state.currentWorld = (state.currentWorld - 1 + state.worldNames.length) % state.worldNames.length;
-        document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
-      }
-    });
+    // ─── UTILITY ───────────────────────────────────────
+    function hexToRGBA(hex, alpha) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
 
-    // ─── Start Render Loop ────────────────────────────────
-    render();
+    // ─── INIT ──────────────────────────────────────────
+    async function init() {
+      await initMediaPipe();
+      await startCamera();
+      render();
+    }
+    init();
   </script>
 </body>
 </html>
