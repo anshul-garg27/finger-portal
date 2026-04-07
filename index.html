@@ -98,7 +98,7 @@
   <canvas id="canvas"></canvas>
   <video id="video" playsinline></video>
   <div id="world-label">GALAXY</div>
-  <div id="hint">Make a circle with thumb & index finger to open portal</div>
+  <div id="hint">Make a circle with thumb & index finger to open portal &nbsp;|&nbsp; Space / Arrow keys to switch worlds</div>
 
   <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js"></script>
@@ -106,14 +106,15 @@
 
   <script>
     // ─── Config ───────────────────────────────────────────
-    const CIRCLE_THRESHOLD = 0.09;  // max normalized distance to detect "circle" gesture
-    const MIN_PORTAL_RADIUS = 20;
-    const MAX_PORTAL_RADIUS = 300;
-    const PORTAL_OPEN_SPEED = 0.12;
-    const PORTAL_CLOSE_SPEED = 0.08;
+    const CIRCLE_THRESHOLD = 0.13;  // max normalized distance to detect "circle" gesture
+    const MIN_PORTAL_RADIUS = 30;
+    const MAX_PORTAL_RADIUS = 400;
+    const PORTAL_OPEN_SPEED = 0.1;
+    const PORTAL_CLOSE_SPEED = 0.06;
     const PARTICLE_COUNT = 15;
     const STAR_COUNT = 400;
     const LEAK_PARTICLE_COUNT = 12;
+    const TILT_SMOOTHING = 0.08;  // smoothing factor for parallax
 
     // ─── State ────────────────────────────────────────────
     const state = {
@@ -129,9 +130,12 @@
       otherHandInPortal: false,
       otherHandFingers: [],
       justClosed: false,
+      burstFired: false,
       burstParticles: [],
       peaceSignCooldown: 0,
       lastFrameTime: 0,
+      smoothTilt: { x: 0, y: 0 },
+      portalWasActive: false,
     };
 
     // ─── World Particles ──────────────────────────────────
@@ -336,13 +340,13 @@
             const handSize = Math.sqrt(
               Math.pow(wrist.x - middleBase.x, 2) + Math.pow(wrist.y - middleBase.y, 2)
             );
-            state.portalTargetRadius = Math.min(MAX_PORTAL_RADIUS, Math.max(MIN_PORTAL_RADIUS, handSize * W * 0.8));
+            state.portalTargetRadius = Math.min(MAX_PORTAL_RADIUS, Math.max(MIN_PORTAL_RADIUS, handSize * W * 1.2));
 
-            // Hand tilt for parallax
+            // Hand tilt for parallax (raw values, smoothed in render loop)
             const tiltX = (middleBase.x - wrist.x);
             const tiltY = (middleBase.y - wrist.y);
-            state.handTilt.x = tiltX * 200;
-            state.handTilt.y = tiltY * 200;
+            state.handTilt.x = tiltX * 250;
+            state.handTilt.y = tiltY * 250;
           }
 
           // Check if OTHER hand's fingers are inside portal
@@ -360,18 +364,18 @@
             }
           }
 
-          // Peace sign detection for world switching (index + middle up, others down)
-          if (state.peaceSignCooldown <= 0) {
+          // Peace sign detection for world switching — only on the non-portal hand
+          if (state.peaceSignCooldown <= 0 && !(dist < CIRCLE_THRESHOLD)) {
             const indexUp = lm[8].y < lm[6].y;
             const middleUp = lm[12].y < lm[10].y;
             const ringDown = lm[16].y > lm[14].y;
             const pinkyDown = lm[20].y > lm[18].y;
-            const thumbIn = Math.abs(lm[4].x - lm[3].x) < 0.04;
+            const thumbIn = Math.abs(lm[4].x - lm[3].x) < 0.06;
 
             if (indexUp && middleUp && ringDown && pinkyDown && thumbIn) {
               state.currentWorld = (state.currentWorld + 1) % state.worldNames.length;
               document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
-              state.peaceSignCooldown = 60; // ~1 second cooldown
+              state.peaceSignCooldown = 90; // ~1.5 second cooldown to prevent rapid switching
             }
           }
         }
@@ -402,26 +406,33 @@
       ctx.drawImage(video, 0, 0, W, H);
       ctx.restore();
 
+      // ── Smooth tilt for parallax ──
+      state.smoothTilt.x += (state.handTilt.x - state.smoothTilt.x) * TILT_SMOOTHING * dt;
+      state.smoothTilt.y += (state.handTilt.y - state.smoothTilt.y) * TILT_SMOOTHING * dt;
+
       // ── Smooth portal radius ──
       if (state.portalActive) {
         state.portalCurrentRadius += (state.portalTargetRadius - state.portalCurrentRadius) * PORTAL_OPEN_SPEED * dt;
         state.portalOpacity = Math.min(1, state.portalOpacity + 0.06 * dt);
+        state.burstFired = false; // reset so burst can fire on next close
+        state.portalWasActive = true;
       } else {
         state.portalCurrentRadius *= (1 - PORTAL_CLOSE_SPEED * dt);
         state.portalOpacity = Math.max(0, state.portalOpacity - 0.04 * dt);
 
-        if (state.portalCurrentRadius > 5 && !state.justClosed) {
-          // Spawn burst particles on close
-          state.justClosed = true;
-          for (let i = 0; i < 20; i++) {
+        // Spawn burst particles ONCE when portal starts closing
+        if (state.portalWasActive && !state.burstFired && state.portalCurrentRadius > 5) {
+          state.burstFired = true;
+          state.portalWasActive = false;
+          for (let i = 0; i < 25; i++) {
             const angle = Math.random() * Math.PI * 2;
             state.burstParticles.push({
               x: state.portalCenter.x,
               y: state.portalCenter.y,
-              vx: Math.cos(angle) * (Math.random() * 4 + 2),
-              vy: Math.sin(angle) * (Math.random() * 4 + 2),
+              vx: Math.cos(angle) * (Math.random() * 5 + 2),
+              vy: Math.sin(angle) * (Math.random() * 5 + 2),
               life: 1,
-              size: Math.random() * 4 + 1,
+              size: Math.random() * 4 + 1.5,
               color: state.worldColors[state.currentWorld],
             });
           }
@@ -429,7 +440,6 @@
 
         if (state.portalCurrentRadius < 2) {
           state.portalCurrentRadius = 0;
-          state.justClosed = false;
         }
       }
 
@@ -449,6 +459,14 @@
 
         // Draw current world
         drawWorld(ctx, cx, cy, r, time, dt);
+
+        // ── Portal vignette (darken edges for depth) ──
+        const vignette = ctx.createRadialGradient(cx, cy, r * 0.4, cx, cy, r);
+        vignette.addColorStop(0, 'transparent');
+        vignette.addColorStop(0.7, 'transparent');
+        vignette.addColorStop(1, 'rgba(0, 0, 0, 0.6)');
+        ctx.fillStyle = vignette;
+        ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
         // ── Reach-in distortion ──
         if (state.otherHandInPortal) {
@@ -521,8 +539,8 @@
 
     // ─── Draw World Functions ─────────────────────────────
     function drawWorld(ctx, cx, cy, r, time, dt) {
-      const px = state.handTilt.x;
-      const py = state.handTilt.y;
+      const px = state.smoothTilt.x;
+      const py = state.smoothTilt.y;
 
       switch (state.currentWorld) {
         case 0: drawGalaxy(ctx, cx, cy, r, time, px, py); break;
@@ -838,6 +856,20 @@
       }
       ctx.globalAlpha = 1;
     }
+
+    // ─── Keyboard Controls (fallback) ──────────────────────
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.code === 'ArrowRight') {
+        e.preventDefault();
+        state.currentWorld = (state.currentWorld + 1) % state.worldNames.length;
+        document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
+      }
+      if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        state.currentWorld = (state.currentWorld - 1 + state.worldNames.length) % state.worldNames.length;
+        document.getElementById('world-label').textContent = state.worldNames[state.currentWorld];
+      }
+    });
 
     // ─── Start Render Loop ────────────────────────────────
     render();
